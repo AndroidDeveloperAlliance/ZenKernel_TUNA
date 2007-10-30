@@ -12,6 +12,12 @@ config IOSCHED_NOOP
 	  that do their own scheduling and require only minimal assistance from
 	  the kernel.
 
+config IOSCHED_FIFO
+	bool
+	default y
+	---help---
+	 A no-op scheduler that really does nothing.
+
 config IOSCHED_DEADLINE
 	tristate "Deadline I/O scheduler"
 	default y

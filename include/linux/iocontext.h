@@ -19,7 +19,6 @@ enum {
 };
 
 struct cfq_io_context {
-	void *key;
 	struct request_queue *q;
 
 	struct cfq_queue *cfqq[2];

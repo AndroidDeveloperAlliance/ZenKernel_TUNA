@@ -62,4 +62,4 @@ obj-$(CONFIG_FSYNC_CONTROL)	+= fsync_control.o
 obj-$(CONFIG_SOUND_CONTROL)	+= sound_control.o
 obj-$(CONFIG_OMAP_TEMP_CONTROL)	+= temp_control.o
 obj-$(CONFIG_VIBRATOR_CONTROL)	+= vibrator_control.o
-
+obj-$(CONFIG_COLOR_CONTROL)	+= color_control.o

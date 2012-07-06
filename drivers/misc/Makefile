@@ -60,4 +60,6 @@ obj-$(CONFIG_LEDS_AN30259A)	+= leds-an30259a.o
 obj-$(CONFIG_BLX)		+= blx.o
 obj-$(CONFIG_FSYNC_CONTROL)	+= fsync_control.o
 obj-$(CONFIG_SOUND_CONTROL)	+= sound_control.o
+obj-$(CONFIG_OMAP_TEMP_CONTROL)	+= temp_control.o
+obj-$(CONFIG_VIBRATOR_CONTROL)	+= vibrator_control.o
 

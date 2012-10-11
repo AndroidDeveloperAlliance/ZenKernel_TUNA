@@ -21,6 +21,20 @@ config IOSCHED_DEADLINE
 	  a new point in the service tree and doing a batch of IO from there
 	  in case of expiry.
 
+config IOSCHED_SIO
+	tristate "Simple I/O (SIO) scheduler"
+	default y
+	---help---
+	  The simple I/O scheduler is based on noop, deadline, and v(r) I/O
+	  schedulers.
+
+	  This algorithm does not do any kind of sorting, as it is aimed for
+	  aleatory access devices, but it does some basic merging. We try to
+	  keep minimum overhead to achieve low latency.
+
+	  Asynchronous and synchronous requests are not treated separately, but
+	  we rely on deadlines to ensure fairness.
+
 config IOSCHED_CFQ
 	tristate "CFQ I/O scheduler"
 	# If BLK_CGROUP is a module, CFQ has to be built as module.
@@ -53,6 +67,9 @@ choice
 	config DEFAULT_DEADLINE
 		bool "Deadline" if IOSCHED_DEADLINE=y
 
+	config DEFAULT_SIO
+		bool "SIO" if IOSCHED_SIO=y
+
 	config DEFAULT_CFQ
 		bool "CFQ" if IOSCHED_CFQ=y
 
@@ -64,6 +81,7 @@ endchoice
 config DEFAULT_IOSCHED
 	string
 	default "deadline" if DEFAULT_DEADLINE
+	default "sio" if DEFAULT_SIO
 	default "cfq" if DEFAULT_CFQ
 	default "noop" if DEFAULT_NOOP
 

@@ -228,11 +228,10 @@ int omap4_prcm_freq_update(void)
 /* Use a very high retry count - we should not hit this condition */
 #define MAX_DPLL_WAIT_TRIES	1000000
 
-#define OMAP_1_5GHz	1500000000
-#define OMAP_1_2GHz	1200000000
-#define OMAP_1GHz	1000000000
-#define OMAP_920MHz	920000000
-#define OMAP_748MHz	748000000
+#define OMAP_1_5GHz	1536000000
+#define OMAP_1_2GHz	1230000000
+#define OMAP_920MHz	1036800000
+#define OMAP_748MHz	729600000
 
 /* Supported only on OMAP4 */
 int omap4_dpllmx_gatectrl_read(struct clk *clk)

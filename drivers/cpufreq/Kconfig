@@ -110,6 +110,12 @@ config CPU_FREQ_DEFAULT_GOV_INTERACTIVE
 	  'interactive' governor for latency-sensitive workloads.
 
 
+config CPU_FREQ_DEFAULT_GOV_INTELLIDEMAND
+	bool "intellidemand"
+	select CPU_FREQ_GOV_INTELLIDEMAND
+	help
+          Use the CPUFreq governor 'intellidemand' as default.
+
 config CPU_FREQ_DEFAULT_GOV_HOTPLUG
 	bool "hotplug"
 	select CPU_FREQ_GOV_HOTPLUG
@@ -195,6 +201,12 @@ config CPU_FREQ_GOV_INTERACTIVE
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_INTELLIDEMAND
+	tristate "'intellidemand' cpufreq governor"
+	depends on CPU_FREQ
+	help
+	  'intellidemand' - an intelligent ondemand governor
 
 config CPU_FREQ_GOV_CONSERVATIVE
 	tristate "'conservative' cpufreq governor"

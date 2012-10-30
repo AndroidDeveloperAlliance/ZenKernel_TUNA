@@ -31,12 +31,6 @@ static void fifo_add_request(struct request_queue *q, struct request *req)
 	list_add_tail(&req->queuelist, &fifo_d->queue);
 }
 
-static int fifo_queue_empty(struct request_queue *q)
-{
-	struct fifo_data *fifo_d = q->elevator->elevator_data;
-	return list_empty(&fifo_d->queue);
-}
-
 static void *fifo_init_queue(struct request_queue *q)
 {
 	struct fifo_data *fifo_d;
@@ -48,12 +42,12 @@ static void *fifo_init_queue(struct request_queue *q)
 	return fifo_d;
 }
 
-static void fifo_exit_queue(elevator_t *e)
+static void fifo_exit_queue(struct elevator_queue *e)
 {
-	struct fifo_data *fifo_d = e->elevator_data;
+        struct fifo_data *fifo_d = e->elevator_data;
 
-	BUG_ON(!list_empty(&fifo_d->queue));
-	kfree(fifo_d);
+        BUG_ON(!list_empty(&fifo_d->queue));
+        kfree(fifo_d);
 }
 
 static int fifo_deny_merge(struct request_queue *req_q, struct request *req,
@@ -66,7 +60,6 @@ static struct elevator_type elevator_fifo = {
 	.ops = {
 		.elevator_dispatch_fn		= fifo_dispatch,
 		.elevator_add_req_fn		= fifo_add_request,
-		.elevator_queue_empty_fn	= fifo_queue_empty,
 		.elevator_allow_merge_fn 	= fifo_deny_merge,
 		.elevator_init_fn		= fifo_init_queue,
 		.elevator_exit_fn		= fifo_exit_queue,

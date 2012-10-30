@@ -339,7 +339,11 @@ static bool sd1idle;
 static bool retrydata;
 #define RETRYCHAN(chan) (((chan) == SDPCM_EVENT_CHANNEL) || retrydata)
 
+#if defined(SDIO_CRC_ERROR_FIX)
+static uint watermark = 48;
+#else
 static const uint watermark = 8;
+#endif
 static const uint firstread = DHD_FIRSTREAD;
 
 #define HDATLEN (firstread - (SDPCM_HDRLEN))
@@ -1546,6 +1550,9 @@ enum {
 	IOV_SDALIGN,
 	IOV_DEVRESET,
 	IOV_CPU,
+#if defined(SDIO_CRC_ERROR_FIX)
+	IOV_WATERMARK,
+#endif /* SDIO_CRC_ERROR_FIX */
 #ifdef SDTEST
 	IOV_PKTGEN,
 	IOV_EXTLOOP,
@@ -1601,6 +1608,9 @@ const bcm_iovar_t dhdsdio_iovars[] = {
 	{"extloop",	IOV_EXTLOOP,	0,	IOVT_BOOL,	0 },
 	{"pktgen",	IOV_PKTGEN,	0,	IOVT_BUFFER,	sizeof(dhd_pktgen_t) },
 #endif /* SDTEST */
+#if defined(SDIO_CRC_ERROR_FIX)
+	{"watermark",   IOV_WATERMARK,  0,      IOVT_UINT32,    0 },
+#endif
 	{"dngl_isolation", IOV_DONGLEISOLATION,	0,	IOVT_UINT32,	0 },
 #ifdef SOFTAP
 	{"fwpath", IOV_FWPATH, 0, IOVT_BUFFER, 0 },
@@ -2615,6 +2625,20 @@ dhdsdio_doiovar(dhd_bus_t *bus, const bcm_iovar_t *vi, uint32 actionid, const ch
 		break;
 #endif /* SDTEST */
 
+#if defined(SDIO_CRC_ERROR_FIX)
+	case IOV_GVAL(IOV_WATERMARK):
+		int_val = (int32)watermark;
+		bcopy(&int_val, arg, val_size);
+		break;
+
+	case IOV_SVAL(IOV_WATERMARK):
+		watermark = (uint)int_val;
+		watermark = (watermark > SBSDIO_WATERMARK_MASK) ? SBSDIO_WATERMARK_MASK : watermark;
+		DHD_ERROR(("Setting watermark as 0x%x.\n", watermark));
+		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_WATERMARK, (uint8)watermark, NULL);
+		break;
+
+#endif /* SDIO_CRC_ERROR_FIX */
 
 	case IOV_GVAL(IOV_DONGLEISOLATION):
 		int_val = bus->dhd->dongle_isolation;
@@ -3167,8 +3191,17 @@ dhd_bus_init(dhd_pub_t *dhdp, bool enforce_mutex)
 			bus->hostintmask |= I_XMTDATA_AVAIL;
 		}
 		W_SDREG(bus->hostintmask, &bus->regs->hostintmask, retries);
+#ifdef SDIO_CRC_ERROR_FIX
+		if (bus->blocksize < 512) {
+			watermark = bus->blocksize / 4;
+		}
+#endif /* SDIO_CRC_ERROR_FIX */
 
 		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_WATERMARK, (uint8)watermark, &err);
+#ifdef SDIO_CRC_ERROR_FIX
+		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_DEVICE_CTL,
+			SBSDIO_DEVCTL_EN_F2_BLK_WATERMARK, NULL);
+#endif /* SDIO_CRC_ERROR_FIX */
 
 		/* Set bus state according to enable result */
 		dhdp->busstate = DHD_BUS_DATA;

@@ -27,6 +27,13 @@ config IOSCHED_DEADLINE
 	  a new point in the service tree and doing a batch of IO from there
 	  in case of expiry.
 
+config IOSCHED_VR
+	tristate "V(R) I/O scheduler"
+	default n
+	---help---
+		Requests are chosen according to SSTF with a penalty of rev_penalty
+		for switching head direction.
+
 config IOSCHED_SIO
 	tristate "Simple I/O (SIO) scheduler"
 	default y

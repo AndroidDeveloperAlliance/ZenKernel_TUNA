@@ -3156,7 +3156,7 @@ static void watermark_wakeup(unsigned long data)
 	struct timer_list *wt = &pgdat->watermark_timer;
 	int i;
 
-	if (!waitqueue_active(&pgdat->kswapd_wait) || above_background_load())
+	if (!waitqueue_active(&pgdat->kswapd_wait))
 		goto out;
 	for (i = pgdat->nr_zones - 1; i >= 0; i--) {
 		struct zone *z = pgdat->node_zones + i;

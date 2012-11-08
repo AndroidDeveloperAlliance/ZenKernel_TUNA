@@ -314,7 +314,7 @@ static struct omap_opp_def __initdata omap446x_opp_def_list[] = {
 	/* SGX OPP2 - OPP100 */
 	OPP_INITIALIZER("gpu", "dpll_per_m7x2_ck", "core", true, 307200000, OMAP4460_VDD_CORE_OPP100_UV),
 	/* SGX OPP3 - OPPOV */
-	OPP_INITIALIZER("gpu", "dpll_per_m7x2_ck", "core", true, 384000000, OMAP4460_VDD_CORE_OPP100_UV),
+	OPP_INITIALIZER("gpu", "dpll_per_m7x2_ck", "core", false, 384000000, OMAP4460_VDD_CORE_OPP100_UV),
 	OPP_INITIALIZER("gpu", "dpll_per_m7x2_ck", "core", false, 512000000, OMAP4460_VDD_CORE_OPP100_OV_UV),
 	/* FDIF OPP1 - OPP25 */
 	OPP_INITIALIZER("fdif", "fdif_fck", "core", true, 32000000, OMAP4460_VDD_CORE_OPP50_UV),
@@ -339,24 +339,25 @@ static struct omap_opp_def __initdata omap446x_opp_def_list[] = {
 };
 
 /**
- * omap4_mpu_opp_enable() - helper to enable the OPP
+ * omap4_opp_enable() - helper to enable the OPP
+ * @oh_name: name of the hwmod device
  * @freq:	frequency to enable
  */
-static void __init omap4_mpu_opp_enable(unsigned long freq)
+static void __init omap4_opp_enable(const char *oh_name, unsigned long freq)
 {
-	struct device *mpu_dev;
+	struct device *dev;
 	int r;
 
-	mpu_dev = omap2_get_mpuss_device();
-	if (!mpu_dev) {
-		pr_err("%s: no mpu_dev, did not enable f=%ld\n", __func__,
-			freq);
+	dev = omap_hwmod_name_get_dev(oh_name);
+	if (IS_ERR(dev)) {
+		pr_err("%s: no %s device, did not enable f=%ld\n", __func__,
+			oh_name, freq);
 		return;
 	}
 
-	r = opp_enable(mpu_dev, freq);
+	r = opp_enable(dev, freq);
 	if (r < 0)
-		dev_err(mpu_dev, "%s: opp_enable failed(%d) f=%ld\n", __func__,
+		dev_err(dev, "%s: opp_enable failed(%d) f=%ld\n", __func__,
 			r, freq);
 }
 
@@ -377,14 +378,14 @@ int __init omap4_opp_init(void)
 			ARRAY_SIZE(omap446x_opp_def_list));
 
 	if (!r) {
-		omap4_mpu_opp_enable(1132800000);
-		omap4_mpu_opp_enable(1230000000);
-		omap4_mpu_opp_enable(1305600000);
-		omap4_mpu_opp_enable(1420800000);
-		omap4_mpu_opp_enable(1536000000);
-		omap4_mpu_opp_enable(1612800000);
-		omap4_mpu_opp_enable(1766400000);
-		omap4_mpu_opp_enable(1804800000);
+		omap4_opp_enable("mpu", 1132800000);
+		omap4_opp_enable("mpu", 1230000000);
+		omap4_opp_enable("mpu", 1305600000);
+		omap4_opp_enable("mpu", 1420800000);
+		omap4_opp_enable("mpu", 1536000000);
+		omap4_opp_enable("mpu", 1612800000);
+		omap4_opp_enable("mpu", 1766400000);
+		omap4_opp_enable("mpu", 1804800000);
 	}
 
 	return r;

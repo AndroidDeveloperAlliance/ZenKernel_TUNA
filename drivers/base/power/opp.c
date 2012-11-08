@@ -453,7 +453,7 @@ int opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 static int opp_set_availability(struct device *dev, unsigned long freq,
 		bool availability_req)
 {
-	struct device_opp *tmp_dev_opp, *dev_opp = ERR_PTR(-ENODEV);
+	struct device_opp *tmp_dev_opp, *dev_opp = NULL;
 	struct opp *new_opp, *tmp_opp, *opp = ERR_PTR(-ENODEV);
 	int r = 0;
 
@@ -503,14 +503,6 @@ static int opp_set_availability(struct device *dev, unsigned long freq,
 	list_replace_rcu(&opp->node, &new_opp->node);
 	mutex_unlock(&dev_opp_list_lock);
 	synchronize_rcu();
-
-	/* Notify the change of the OPP availability */
-	if (availability_req)
-		srcu_notifier_call_chain(&dev_opp->head, OPP_EVENT_ENABLE,
-						new_opp);
-	else
-		srcu_notifier_call_chain(&dev_opp->head, OPP_EVENT_DISABLE,
-						new_opp);
 
 	/* clean up old opp */
 	new_opp = opp;

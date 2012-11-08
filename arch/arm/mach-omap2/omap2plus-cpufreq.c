@@ -476,15 +476,15 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	if (oc_val == 0) {
         	ret += opp_disable(dev, gpu_freqs[1]);
 		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("disabled %lu and $lu", gpu_freqs[1], gpu_freqs[2]);
+		pr_info("disabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
 	} else if (oc_val == 1) {
 		ret += opp_enable(dev, gpu_freqs[1]);
 		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and disabled $lu", gpu_freqs[1], gpu_freqs[2]);
+		pr_info("enabled %lu and disabled %lu", gpu_freqs[1], gpu_freqs[2]);
 	} else if (oc_val == 2) {
 		ret += opp_enable(dev, gpu_freqs[1]);
 		ret += opp_enable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and $lu", gpu_freqs[1], gpu_freqs[2]);
+		pr_info("enabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
 	}
         pr_info("gpu top speed changed to %lu (%d)\n",
 		gpu_freqs[oc_val], ret);
@@ -576,7 +576,7 @@ static struct freq_attr omap_uv_mv_table = {
 };
 
 static struct freq_attr gpu_oc = {
-	.attr = {.name = "gpu_oc", .mode=0666,},
+	.attr = {.name = "gpu_oc", .mode=0644,},
 	.show = show_gpu_oc,
 	.store = store_gpu_oc,
 };

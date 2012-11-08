@@ -454,14 +454,15 @@ static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
 {
 	return sprintf(buf, "%d\n", oc_val);
 }
+
 static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size_t size)
 {
+	int prev_oc, ret1, ret2; 
         struct device *dev;
 	unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
-	int ret = 0;
-	int prev_oc_val = oc_val;
 
-	if (oc_val < 0 || oc_val > 2) {
+	prev_oc = oc_val;
+	if (prev_oc < 0 || prev_oc > 2) {
 		// shouldn't be here
 		pr_info("[imoseyon] gpu_oc error - bailing\n");
 		return size;
@@ -470,27 +471,17 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	sscanf(buf, "%d\n", &oc_val);
 	if (oc_val < 0 ) oc_val = 0;
 	if (oc_val > 2 ) oc_val = 2;
-	if (oc_val == prev_oc_val) return size;
+	if (prev_oc == oc_val) return size;
 
         dev = omap_hwmod_name_get_dev("gpu");
-	if (oc_val == 0) {
-        	ret += opp_disable(dev, gpu_freqs[1]);
-		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("disabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
-	} else if (oc_val == 1) {
-		ret += opp_enable(dev, gpu_freqs[1]);
-		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and disabled %lu", gpu_freqs[1], gpu_freqs[2]);
-	} else if (oc_val == 2) {
-		ret += opp_enable(dev, gpu_freqs[1]);
-		ret += opp_enable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
-	}
-        pr_info("gpu top speed changed to %lu (%d)\n",
-		gpu_freqs[oc_val], ret);
+        ret1 = opp_disable(dev, gpu_freqs[prev_oc]);
+        ret2 = opp_enable(dev, gpu_freqs[oc_val]);
+        pr_info("[imoseyon] gpu top speed changed from %lu to %lu (%d,%d)\n",
+		gpu_freqs[prev_oc], gpu_freqs[oc_val], ret1, ret2);
 
 	return size;
 }
+
 static ssize_t show_uv_mv_table(struct cpufreq_policy *policy, char *buf)
 {
 	int i = 0;
@@ -639,7 +630,7 @@ static int __init omap_cpufreq_init(void)
 {
 	int ret;
 
-	oc_val = 0;
+	oc_val = 1;
 
 	if (cpu_is_omap24xx())
 		mpu_clk_name = "virt_prcm_set";

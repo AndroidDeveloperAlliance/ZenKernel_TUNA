@@ -576,11 +576,13 @@ static struct freq_attr omap_uv_mv_table = {
 	.store = store_uv_mv_table,
 };
 
+#if 0
 static struct freq_attr gpu_oc = {
 	.attr = {.name = "gpu_oc", .mode=0644,},
 	.show = show_gpu_oc,
 	.store = store_gpu_oc,
 };
+#endif
 
 static struct freq_attr *omap_cpufreq_attr[] = {
 	&cpufreq_freq_attr_scaling_available_freqs,

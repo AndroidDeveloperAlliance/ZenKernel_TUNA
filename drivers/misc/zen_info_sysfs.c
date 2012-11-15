@@ -66,6 +66,7 @@ static struct attribute_group zen_info_option_group = {
 
 int init_sysfs_interface(void)
 {
+	int ret;
 	/* Create /sys/kernel/zen_info/ */
 	zeninfo_kobj = kobject_create_and_add("zen_info", kernel_kobj);
 	if (zeninfo_kobj == NULL) {
@@ -73,11 +74,11 @@ int init_sysfs_interface(void)
 		return -ENOMEM;
 	} else {
 		/* Add zen_version_code */
-		sysfs_create_group(zeninfo_kobj, &zen_info_option_group);
+		rert = sysfs_create_group(zeninfo_kobj, &zen_info_option_group);
 		printk(KERN_INFO "zen_info: sysfs interface initiated.\n");
 	}
 
-	return 0;
+	return ret;
 }
 
 void cleanup_sysfs_interface(void)

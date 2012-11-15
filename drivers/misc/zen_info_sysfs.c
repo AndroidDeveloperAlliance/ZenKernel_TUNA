@@ -74,7 +74,7 @@ int init_sysfs_interface(void)
 		return -ENOMEM;
 	} else {
 		/* Add zen_version_code */
-		rert = sysfs_create_group(zeninfo_kobj, &zen_info_option_group);
+		ret = sysfs_create_group(zeninfo_kobj, &zen_info_option_group);
 		printk(KERN_INFO "zen_info: sysfs interface initiated.\n");
 	}
 

@@ -143,15 +143,15 @@ static unsigned int get_nr_run_avg(void)
  * It helps to keep variable names smaller, simpler
  */
 
-#define DEF_SAMPLING_DOWN_FACTOR		(2)
+#define DEF_SAMPLING_DOWN_FACTOR		(3)
 #define MAX_SAMPLING_DOWN_FACTOR		(100000)
-#define DEF_FREQUENCY_DOWN_DIFFERENTIAL		(5)
-#define DEF_FREQUENCY_UP_THRESHOLD		(85)
+#define DEF_FREQUENCY_DOWN_DIFFERENTIAL		(13)
+#define DEF_FREQUENCY_UP_THRESHOLD		(97)
 #define DEF_FREQUENCY_MIN_SAMPLE_RATE		(10000)
 #define MIN_FREQUENCY_UP_THRESHOLD		(11)
 #define MAX_FREQUENCY_UP_THRESHOLD		(100)
-#define DEF_SAMPLING_RATE			(50000)
-#define MIN_SAMPLING_RATE			(10000)
+#define DEF_SAMPLING_RATE			(65000)
+#define MIN_SAMPLING_RATE			(20000)
 #define MAX_HOTPLUG_RATE			(40u)
 
 #define DEF_MAX_CPU_LOCK			(0)
@@ -159,13 +159,13 @@ static unsigned int get_nr_run_avg(void)
 #define DEF_CPU_UP_FREQ				(576000)
 #define DEF_CPU_DOWN_FREQ			(384000)
 #define DEF_UP_NR_CPUS				(1)
-#define DEF_CPU_UP_RATE				(10)
-#define DEF_CPU_DOWN_RATE			(20)
-#define DEF_FREQ_STEP				(37)
+#define DEF_CPU_UP_RATE				(7)
+#define DEF_CPU_DOWN_RATE			(3)
+#define DEF_FREQ_STEP				(20)
 #define DEF_START_DELAY				(0)
 
-#define UP_THRESHOLD_AT_MIN_FREQ		(40)
-#define FREQ_FOR_RESPONSIVENESS			(400000)
+#define UP_THRESHOLD_AT_MIN_FREQ		(60)
+#define FREQ_FOR_RESPONSIVENESS			(300000)
 
 #define HOTPLUG_DOWN_INDEX			(0)
 #define HOTPLUG_UP_INDEX			(1)
@@ -271,7 +271,7 @@ static struct dbs_tuners {
 	.up_threshold = DEF_FREQUENCY_UP_THRESHOLD,
 	.sampling_down_factor = DEF_SAMPLING_DOWN_FACTOR,
 	.down_differential = DEF_FREQUENCY_DOWN_DIFFERENTIAL,
-	.ignore_nice = 0,
+	.ignore_nice = 1,
 	.freq_step = DEF_FREQ_STEP,
 	.cpu_up_rate = DEF_CPU_UP_RATE,
 	.cpu_down_rate = DEF_CPU_DOWN_RATE,
@@ -1375,6 +1375,8 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 
 		dbs_tuners_ins.max_freq = policy->max;
 		dbs_tuners_ins.min_freq = policy->min;
+		dbs_tuners_ins.cpu_down_freq = policy->min;
+
 		hotplug_history->num_hist = 0;
 		start_rq_work();
 
@@ -1409,7 +1411,7 @@ static int cpufreq_governor_dbs(struct cpufreq_policy *policy,
 
 			min_sampling_rate = MIN_SAMPLING_RATE;
 			dbs_tuners_ins.sampling_rate = DEF_SAMPLING_RATE;
-			dbs_tuners_ins.io_is_busy = 0;
+			dbs_tuners_ins.io_is_busy = 1;
 		}
 		mutex_unlock(&dbs_mutex);
 

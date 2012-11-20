@@ -1605,7 +1605,40 @@ EXPORT_SYMBOL(cpufreq_get_policy);
 static int __cpufreq_set_policy(struct cpufreq_policy *data,
 				struct cpufreq_policy *policy)
 {
-	int ret = 0;
+	int i = 0, ret = 0, min = 0, max = 0;
+	unsigned long available_frequencies[14] =
+	{
+		192000,
+		230400,
+		384000,
+		576000,
+		729600,
+		1036800,
+		1132800,
+		1230000,
+		1305600,
+		1420800,
+		1536000,
+		1612800,
+		1766400,
+		1804800,
+	};
+
+	for (i = 0; i < sizeof(available_frequencies); i++) {
+		if (available_frequencies[i] == policy->min)
+			min = 1;
+		if (available_frequencies[i] == policy->max)
+			max = 1;
+		if (min && max) {
+			ret = 1;
+			break;
+		}
+	}
+
+	if (!ret) {
+		ret = -EINVAL;
+		goto error_out;
+	}
 
 	pr_debug("setting new policy for CPU %u: %u - %u kHz\n", policy->cpu,
 		policy->min, policy->max);

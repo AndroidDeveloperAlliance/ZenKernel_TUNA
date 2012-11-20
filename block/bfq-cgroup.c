@@ -754,7 +754,7 @@ static void bfqio_attach(struct cgroup_subsys *subsys, struct cgroup *cgroup,
 					bfq_bic_change_cgroup(icq_to_bic(icq),
 							      cgroup);
 			rcu_read_unlock();
-			put_io_context(ioc);
+			put_io_context(ioc, NULL);
 		}
 	}
 }

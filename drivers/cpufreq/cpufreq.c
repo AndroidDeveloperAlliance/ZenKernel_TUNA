@@ -1606,7 +1606,7 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 				struct cpufreq_policy *policy)
 {
 	int i = 0, ret = 0, min = 0, max = 0;
-	unsigned long available_frequencies[14] =
+	unsigned long available_frequencies[] =
 	{
 		192000,
 		230400,
@@ -1624,7 +1624,7 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 		1804800,
 	};
 
-	for (i = 0; i < sizeof(available_frequencies); i++) {
+	for (i = 0; i < ARRAY_SIZE(available_frequencies); i++) {
 		if (available_frequencies[i] == policy->min)
 			min = 1;
 		if (available_frequencies[i] == policy->max)

@@ -5,7 +5,6 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/bio.h>
-#include <linux/bitmap.h>
 #include <linux/blkdev.h>
 #include <linux/bootmem.h>	/* for max_pfn/max_low_pfn */
 #include <linux/slab.h>
@@ -17,12 +16,13 @@
  */
 static struct kmem_cache *iocontext_cachep;
 
-static void hlist_sched_dtor(struct io_context *ioc, struct hlist_head *list)
+static void cfq_dtor(struct io_context *ioc)
 {
-	if (!hlist_empty(list)) {
+	if (!hlist_empty(&ioc->cic_list)) {
 		struct cfq_io_context *cic;
 
-		cic = hlist_entry(list->first, struct cfq_io_context, cic_list);
+		cic = hlist_entry(ioc->cic_list.first, struct cfq_io_context,
+								cic_list);
 		cic->dtor(ioc);
 	}
 }
@@ -40,9 +40,7 @@ int put_io_context(struct io_context *ioc)
 
 	if (atomic_long_dec_and_test(&ioc->refcount)) {
 		rcu_read_lock();
-
-		hlist_sched_dtor(ioc, &ioc->cic_list);
-		hlist_sched_dtor(ioc, &ioc->bfq_cic_list);
+		cfq_dtor(ioc);
 		rcu_read_unlock();
 
 		kmem_cache_free(iocontext_cachep, ioc);
@@ -52,14 +50,15 @@ int put_io_context(struct io_context *ioc)
 }
 EXPORT_SYMBOL(put_io_context);
 
-static void hlist_sched_exit(struct io_context *ioc, struct hlist_head *list)
+static void cfq_exit(struct io_context *ioc)
 {
 	rcu_read_lock();
 
-	if (!hlist_empty(list)) {
+	if (!hlist_empty(&ioc->cic_list)) {
 		struct cfq_io_context *cic;
 
-		cic = hlist_entry(list->first, struct cfq_io_context, cic_list);
+		cic = hlist_entry(ioc->cic_list.first, struct cfq_io_context,
+								cic_list);
 		cic->exit(ioc);
 	}
 	rcu_read_unlock();
@@ -75,10 +74,9 @@ void exit_io_context(struct task_struct *task)
 	task->io_context = NULL;
 	task_unlock(task);
 
-	if (atomic_dec_and_test(&ioc->nr_tasks)) {
-		hlist_sched_exit(ioc, &ioc->cic_list);
-		hlist_sched_exit(ioc, &ioc->bfq_cic_list);
-	}
+	if (atomic_dec_and_test(&ioc->nr_tasks))
+		cfq_exit(ioc);
+
 	put_io_context(ioc);
 }
 

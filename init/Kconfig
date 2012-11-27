@@ -27,6 +27,10 @@ config IRQ_WORK
 	bool
 	depends on HAVE_IRQ_WORK
 
+config ANDROID41_COMPAT
+	bool "Build with compatiblity for android 4.1 by default"
+	default n
+
 menu "General setup"
 
 config EXPERIMENTAL

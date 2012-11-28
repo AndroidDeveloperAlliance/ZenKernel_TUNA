@@ -699,24 +699,8 @@ int zram_init_device(struct zram *zram)
 		goto fail_no_table;
 	}
 
-<<<<<<< HEAD
-#ifdef CONFIG_ZRAM_FOR_ANDROID
-	page = alloc_page(__GFP_ZERO);
-	if (!page) {
-		pr_err("Error allocating swap header page\n");
-		ret = -ENOMEM;
-		goto fail;
-	}
-	zram->table[0].page = page;
-	zram_set_flag(zram, 0, ZRAM_UNCOMPRESSED);
-	swap_header = kmap(page);
-	setup_swap_header(zram, swap_header);
-	kunmap(page);
-#endif /* CONFIG_ZRAM_FOR_ANDROID */
-=======
 	set_capacity(zram->disk, zram->disksize >> SECTOR_SHIFT);
 
->>>>>>> parent of 5fec809... Add zram for android optimization
 	/* zram devices sort of resembles non-rotational disks */
 	queue_flag_set_unlocked(QUEUE_FLAG_NONROT, zram->disk->queue);
 
@@ -860,26 +844,15 @@ static int __init zram_init(void)
 	}
 
 	/* Allocate the device array and initialize each one */
-<<<<<<< HEAD
-	pr_info("Creating %u devices ...\n", zram_num_devices);
-	zram_devices = kzalloc(zram_num_devices * sizeof(struct zram), GFP_KERNEL);
-	if (!zram_devices) {
-=======
 	pr_info("Creating %u devices ...\n", num_devices);
 	devices = kzalloc(num_devices * sizeof(struct zram), GFP_KERNEL);
 	if (!devices) {
->>>>>>> parent of 5fec809... Add zram for android optimization
 		ret = -ENOMEM;
 		goto unregister;
 	}
 
-<<<<<<< HEAD
-	for (dev_id = 0; dev_id < zram_num_devices; dev_id++) {
-		ret = create_device(&zram_devices[dev_id], dev_id);
-=======
 	for (dev_id = 0; dev_id < num_devices; dev_id++) {
 		ret = create_device(&devices[dev_id], dev_id);
->>>>>>> parent of 5fec809... Add zram for android optimization
 		if (ret)
 			goto free_devices;
 	}
@@ -901,13 +874,8 @@ static void __exit zram_exit(void)
 	int i;
 	struct zram *zram;
 
-<<<<<<< HEAD
-	for (i = 0; i < zram_num_devices; i++) {
-		zram = &zram_devices[i];
-=======
 	for (i = 0; i < num_devices; i++) {
 		zram = &devices[i];
->>>>>>> parent of 5fec809... Add zram for android optimization
 
 		destroy_device(zram);
 		if (zram->init_done)

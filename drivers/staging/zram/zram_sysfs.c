@@ -34,13 +34,8 @@ static struct zram *dev_to_zram(struct device *dev)
 	int i;
 	struct zram *zram = NULL;
 
-<<<<<<< HEAD
-	for (i = 0; i < zram_num_devices; i++) {
-		zram = &zram_devices[i];
-=======
 	for (i = 0; i < num_devices; i++) {
 		zram = &devices[i];
->>>>>>> parent of 5fec809... Add zram for android optimization
 		if (disk_to_dev(zram->disk) == dev)
 			break;
 	}

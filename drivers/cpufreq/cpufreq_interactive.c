@@ -178,9 +178,6 @@ static void cpufreq_interactive_timer(unsigned long data)
 		} else {
 			new_freq = pcpu->policy->max * cpu_load / 100;
 
-			if (new_freq < hispeed_freq)
-				new_freq = hispeed_freq;
-
 			if (pcpu->target_freq == hispeed_freq &&
 			    new_freq > hispeed_freq &&
 			    now - pcpu->hispeed_validate_time

@@ -861,7 +861,7 @@ static int __init zram_init(void)
 	int ret, dev_id;
 
 	if (zram_num_devices > max_num_devices) {
-		pr_warning("Invalid value for num_devices: %u\n",
+		pr_warning("Invalid value for zram_num_devices: %u\n",
 				zram_num_devices);
 		ret = -EINVAL;
 		goto out;
@@ -875,19 +875,19 @@ static int __init zram_init(void)
 	}
 
 	if (!zram_num_devices) {
-		pr_info("num_devices not specified. Using default: 1\n");
+		pr_info("zram_num_devices not specified. Using default: 1\n");
 		zram_num_devices = 1;
 	}
 
 	/* Allocate the device array and initialize each one */
-	pr_info("Creating %u devices ...\n", num_devices);
-	zram_devices = kzalloc(num_devices * sizeof(struct zram), GFP_KERNEL);
+	pr_info("Creating %u devices ...\n", zram_num_devices);
+	zram_devices = kzalloc(zram_num_devices * sizeof(struct zram), GFP_KERNEL);
 	if (!zram_devices) {
 		ret = -ENOMEM;
 		goto unregister;
 	}
 
-	for (dev_id = 0; dev_id < num_devices; dev_id++) {
+	for (dev_id = 0; dev_id < zram_num_devices; dev_id++) {
 		ret = create_device(&zram_devices[dev_id], dev_id);
 		if (ret)
 			goto free_devices;
@@ -910,7 +910,7 @@ static void __exit zram_exit(void)
 	int i;
 	struct zram *zram;
 
-	for (i = 0; i < num_devices; i++) {
+	for (i = 0; i < zram_num_devices; i++) {
 		zram = &zram_devices[i];
 
 		destroy_device(zram);

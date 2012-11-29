@@ -443,7 +443,6 @@ struct opp {
         struct device_opp *dev_opp;
 };
 
-#if 0
 /*
  * Variable GPU OC - sysfs interface for cycling through different GPU top speeds
  * Author: imoseyon@gmail.com
@@ -455,42 +454,42 @@ static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
 }
 static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size_t size)
 {
-        struct device *dev;
-	unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
-	int ret = 0;
-	int prev_oc_val = oc_val;
+	int prev_oc;
 
-	if (oc_val < 0 || oc_val > 2) {
+	prev_oc = oc_val;
+	if (prev_oc < 0 || prev_oc > 2) {
 		// shouldn't be here
-		pr_info("[imoseyon] gpu_oc error - bailing\n");
+		pr_info("[GPU_OC] GPU_OC value out of range - bailing\n"); 
 		return size;
 	}
 
 	sscanf(buf, "%d\n", &oc_val);
 	if (oc_val < 0 ) oc_val = 0;
 	if (oc_val > 2 ) oc_val = 2;
-	if (oc_val == prev_oc_val) return size;
+	if (prev_oc == oc_val) return size;
 
-        dev = omap_hwmod_name_get_dev("gpu");
-	if (oc_val == 0) {
-        	ret += opp_disable(dev, gpu_freqs[1]);
-		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("disabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
-	} else if (oc_val == 1) {
-		ret += opp_enable(dev, gpu_freqs[1]);
-		ret += opp_disable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and disabled %lu", gpu_freqs[1], gpu_freqs[2]);
-	} else if (oc_val == 2) {
-		ret += opp_enable(dev, gpu_freqs[1]);
-		ret += opp_enable(dev, gpu_freqs[2]);
-		pr_info("enabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
-	}
-        pr_info("gpu top speed changed to %lu (%d)\n",
-		gpu_freqs[oc_val], ret);
+	set_gpu_oc(oc_val, prev_oc);
 
 	return size;
 }
-#endif
+
+//--TODO use return value for error handling?
+static void set_gpu_oc(int new_oc, int prev_oc)
+{
+	int ret1, ret2;
+	struct device *dev;
+	unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
+
+	dev = omap_hwmod_name_get_dev("gpu");
+	ret1 = opp_disable(dev, gpu_freqs[prev_oc]);
+	ret2 = opp_enable(dev, gpu_freqs[oc_val]);
+	pr_info("[GPU_OC] GPU top speed changed from %lu to %lu (%d,%d)\n",
+		gpu_freqs[prev_oc], gpu_freqs[oc_val], ret1, ret2);
+	omap_sr_disable(core_voltdm);
+	omap_voltage_calib_reset(core_voltdm);
+	voltdm_reset(core_voltdm);
+	omap_sr_enable(core_voltdm, vdata);
+}
 
 static ssize_t show_uv_mv_table(struct cpufreq_policy *policy, char *buf)
 {
@@ -576,21 +575,17 @@ static struct freq_attr omap_uv_mv_table = {
 	.store = store_uv_mv_table,
 };
 
-#if 0
 static struct freq_attr gpu_oc = {
 	.attr = {.name = "gpu_oc", .mode=0644,},
 	.show = show_gpu_oc,
 	.store = store_gpu_oc,
 };
-#endif
 
 static struct freq_attr *omap_cpufreq_attr[] = {
 	&cpufreq_freq_attr_scaling_available_freqs,
 	&omap_cpufreq_attr_screen_off_freq,
 	&omap_uv_mv_table,
-#if 0
 	&gpu_oc,
-#endif
 	NULL,
 };
 
@@ -644,7 +639,7 @@ static int __init omap_cpufreq_init(void)
 {
 	int ret;
 
-	oc_val = 0;
+	oc_val = 1;
 
 	if (cpu_is_omap24xx())
 		mpu_clk_name = "virt_prcm_set";

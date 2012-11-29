@@ -40,6 +40,7 @@
 
 #include <mach/hardware.h>
 
+#include "smartreflex.h"
 #include "dvfs.h"
 
 #ifdef CONFIG_SMP
@@ -67,7 +68,7 @@ static unsigned int screen_off_max_freq = 576000;
 static bool omap_cpufreq_ready;
 static bool omap_cpufreq_suspended;
 
-static int oc_val;
+static int oc_val = 1;
 
 static unsigned int omap_getspeed(unsigned int cpu)
 {
@@ -447,20 +448,40 @@ struct opp {
  * Variable GPU OC - sysfs interface for cycling through different GPU top speeds
  * Author: imoseyon@gmail.com
  *
-*/
+ */
 
-//--TODO use return value for error handling?
-static void set_gpu_oc(int new_oc, int prev_oc)
+static int set_gpu_oc(int new_oc, int prev_oc)
 {
-        int ret1, ret2;
+        int ret = 0;
         struct device *dev;
         unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
+	struct voltagedomain *core_voltdm = voltdm_lookup("core");
+	struct omap_volt_data *vdata = omap_voltage_get_curr_vdata(core_voltdm);
 
         dev = omap_hwmod_name_get_dev("gpu");
-        ret1 = opp_disable(dev, gpu_freqs[prev_oc]);
-        ret2 = opp_enable(dev, gpu_freqs[new_oc]);
-        pr_info("[GPU_OC] GPU top speed changed from %lu to %lu (%d,%d)\n",
-                gpu_freqs[prev_oc], gpu_freqs[new_oc], ret1, ret2);
+	//--Ensure 307MHz is always enabled
+	ret += opp_enable(dev, gpu_freqs[0]);
+	if (oc_val == 0) {
+        	ret += opp_disable(dev, gpu_freqs[1]);
+		ret += opp_disable(dev, gpu_freqs[2]);
+		pr_info("disabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
+	} else if (oc_val == 1) {
+		ret += opp_enable(dev, gpu_freqs[1]);
+		ret += opp_disable(dev, gpu_freqs[2]);
+		pr_info("enabled %lu and disabled %lu", gpu_freqs[1], gpu_freqs[2]);
+	} else if (oc_val == 2) {
+		ret += opp_enable(dev, gpu_freqs[1]);
+		ret += opp_enable(dev, gpu_freqs[2]);
+		pr_info("enabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
+	}
+
+	//--Smartreflex recalibration
+	omap_sr_disable(core_voltdm);
+	omap_voltage_calib_reset(core_voltdm);
+	voltdm_reset(core_voltdm);
+	omap_sr_enable(core_voltdm, vdata);
+
+	return ret;
 }
 
 static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
@@ -469,21 +490,29 @@ static ssize_t show_gpu_oc(struct cpufreq_policy *policy, char *buf)
 }
 static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size_t size)
 {
-	int prev_oc;
+	int prev_oc = oc_val;
+	int ret;
 
-	prev_oc = oc_val;
 	if (prev_oc < 0 || prev_oc > 2) {
 		// shouldn't be here
-		pr_info("[GPU_OC] GPU_OC value out of range - bailing\n"); 
+		pr_info("[GPU_OC] GPU_OC value out of range - bailing\n");
 		return size;
 	}
 
 	sscanf(buf, "%d\n", &oc_val);
 	if (oc_val < 0 ) oc_val = 0;
 	if (oc_val > 2 ) oc_val = 2;
-	if (prev_oc == oc_val) return size;
 
-	set_gpu_oc(oc_val, prev_oc);
+	/*
+	 * Set the GPU_OC even if prev_oc == oc_val.
+	 * This way in the event of SGX HW recovery it
+	 * will reset the GPU settings
+	 * without changing oc_val
+	 */
+	ret = set_gpu_oc(oc_val, prev_oc);
+	if (ret) {
+		pr_info("[GPU_OC] Failed to change from %d to %d\n", prev_oc, oc_val);
+	}
 
 	return size;
 }
@@ -635,8 +664,6 @@ static struct platform_device omap_cpufreq_device = {
 static int __init omap_cpufreq_init(void)
 {
 	int ret;
-
-	oc_val = 1;
 
 	if (cpu_is_omap24xx())
 		mpu_clk_name = "virt_prcm_set";

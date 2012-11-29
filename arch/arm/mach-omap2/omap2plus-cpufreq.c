@@ -454,7 +454,7 @@ static int set_gpu_oc(int new_oc, int prev_oc)
 {
         int ret = 0;
         struct device *dev;
-        unsigned long gpu_freqs[3] = {307200000,384000000,512000000};
+        unsigned long gpu_freqs[3] = { 307200000, 384000000, 512000000 };
 	struct voltagedomain *core_voltdm = voltdm_lookup("core");
 	struct omap_volt_data *vdata = omap_voltage_get_curr_vdata(core_voltdm);
 
@@ -469,11 +469,14 @@ static int set_gpu_oc(int new_oc, int prev_oc)
 		ret += opp_enable(dev, gpu_freqs[1]);
 		ret += opp_disable(dev, gpu_freqs[2]);
 		pr_info("enabled %lu and disabled %lu", gpu_freqs[1], gpu_freqs[2]);
-	} else if (oc_val == 2) {
+	}
+/* TODO: Fix 512MHz from not working, disabled for now
+	 else if (oc_val == 2) {
 		ret += opp_enable(dev, gpu_freqs[1]);
 		ret += opp_enable(dev, gpu_freqs[2]);
 		pr_info("enabled %lu and %lu", gpu_freqs[1], gpu_freqs[2]);
 	}
+*/
 
 	//--Smartreflex recalibration
 	omap_sr_disable(core_voltdm);
@@ -493,7 +496,7 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 	int prev_oc = oc_val;
 	int ret;
 
-	if (prev_oc < 0 || prev_oc > 2) {
+	if (prev_oc < 0 || prev_oc > 1) {
 		// shouldn't be here
 		pr_info("[GPU_OC] GPU_OC value out of range - bailing\n");
 		return size;
@@ -501,7 +504,7 @@ static ssize_t store_gpu_oc(struct cpufreq_policy *policy, const char *buf, size
 
 	sscanf(buf, "%d\n", &oc_val);
 	if (oc_val < 0 ) oc_val = 0;
-	if (oc_val > 2 ) oc_val = 2;
+	if (oc_val > 1 ) oc_val = 1;
 
 	/*
 	 * Set the GPU_OC even if prev_oc == oc_val.

@@ -24,8 +24,6 @@
 #include <linux/sched.h>
 #include <linux/kthread.h>
 
-#include <mach/ppmu.h>
-
 /*
  * dbs is used in this file as a shortform for demandbased switching
  * It helps to keep variable names smaller, simpler

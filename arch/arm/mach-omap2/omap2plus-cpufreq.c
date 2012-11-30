@@ -64,7 +64,7 @@ static unsigned int max_thermal;
 static unsigned int max_capped;
 static unsigned int max_freq;
 static unsigned int current_target_freq;
-static unsigned int screen_off_max_freq = 576000;
+static unsigned int screen_off_max_freq = 729600;
 static bool omap_cpufreq_ready;
 static bool omap_cpufreq_suspended;
 

@@ -29,6 +29,7 @@ Contents:
 2.4  Ondemand
 2.5  Conservative
 2.6  Interactive
+2.8  Zeneractive
 
 3.   The Governor Interface in the CPUfreq Core
 
@@ -278,6 +279,61 @@ entropy and leads to lots of spurious plug-in and plug-out transitions.
 The number of sampling periods averaged together is tunable via the
 "hotplug_in_sampling_periods" and "hotplug_out_sampling_periods"
 run-time tunable parameters.
+
+2.8 Zeneractive
+---------------
+
+The CPUfreq governor "zeneractive" behaves exactly the same as
+"interactive" when scaling frequencies.
+
+Zeneractive also hotplugs CPUs based on the current CPU load.
+For example, if unplug_load_cpu1 is set to 15 and current CPU
+load > 15, CPU1 will be enabled. If CPU load is is <=15 CPU1
+will be disabled.
+
+Zeneractive waits hotplug_delay in between hotplug attempts.
+This means that CPU load will not be compared to unplug_load
+until after hotplug_delay
+
+Zeneractive also will suspend all but CPU 0 on early suspend
+and wake up all CPUs on wakeup.
+
+Hotplugging while awake can be disabled per-CPU by setting 
+unplug_freq_cpu[#] to 0.
+
+The tuneable values for this governor are:
+
+min_sample_time: The minimum amount of time to spend at the current
+frequency before ramping down. This is to ensure that the governor has
+seen enough historic cpu load data to determine the appropriate
+workload.  Default is 80000 uS.
+
+hispeed_freq: An intermediate "hi speed" at which to initially ramp
+when CPU load hits the value specified in go_hispeed_load.  If load
+stays high for the amount of time specified in above_hispeed_delay,
+then speed may be bumped higher.  Default is maximum speed.
+
+go_hispeed_load: The CPU load at which to ramp to the intermediate "hi
+speed".  Default is 85%.
+
+above_hispeed_delay: Once speed is set to hispeed_freq, wait for this
+long before bumping speed higher in response to continued high load.
+Default is 20000 uS.
+
+timer_rate: Sample rate for reevaluating cpu load when the system is
+not idle.  Default is 20000 uS.
+
+hotplug_delay: How long we should wait between hotplug attempts.
+Default is 80000 uS.
+
+unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
+Default is 15%
+
+unplug_load_cpu2: CPU load that we should unplug CPU 2 at.
+default is 60%
+
+unplug_load_cpu3: CPU load that we should unplug CPU 3 at.
+default is 75%
 
 3. The Governor Interface in the CPUfreq Core
 =============================================

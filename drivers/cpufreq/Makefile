@@ -16,6 +16,7 @@ obj-$(CONFIG_CPU_FREQ_GOV_ADAPTIVE)	+= cpufreq_adaptive.o
 obj-$(CONFIG_CPU_FREQ_GOV_ADAPTIVEX)	+= cpufreq_adaptivex.o
 obj-$(CONFIG_CPU_FREQ_GOV_CONSERVATIVE)	+= cpufreq_conservative.o
 obj-$(CONFIG_CPU_FREQ_GOV_INTERACTIVE)	+= cpufreq_interactive.o
+obj-$(CONFIG_CPU_FREQ_GOV_ZENERACTIVE)	+= cpufreq_zeneractive.o
 obj-$(CONFIG_CPU_FREQ_GOV_HOTPLUG)	+= cpufreq_hotplug.o
 
 # CPUfreq cross-arch helpers

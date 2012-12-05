@@ -1,0 +1,11 @@
+#!/system/bin/sh
+
+# Allow governor/max/min freq to be set properly
+chown root system /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+chmod 0664 /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+chown root system /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+chmod 0664 /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq
+chown root system /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+chmod 0664 /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq
+# Set sysctl
+/system/bin/set_zen_sysctl

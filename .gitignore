@@ -79,3 +79,7 @@ GTAGS
 *.orig
 *~
 \#*#
+
+# Zen changes
+zip_template/kernel/zImage
+*.zip

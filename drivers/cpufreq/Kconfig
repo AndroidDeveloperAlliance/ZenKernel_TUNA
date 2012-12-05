@@ -135,6 +135,12 @@ config CPU_FREQ_DEFAULT_GOV_INTELLIDEMAND
 	help
           Use the CPUFreq governor 'intellidemand' as default.
 
+config CPU_FREQ_DEFAULT_GOV_INTELLIDEMANDX
+        bool "intellidemandX"
+        select CPU_FREQ_GOV_INTELLIDEMANDX
+        help
+          Use the CPUFreq governor 'intellidemandx' as default.
+
 config CPU_FREQ_DEFAULT_GOV_LULZACTIVEQ
 	bool "lulzactiveq"
 	select CPU_FREQ_GOV_LULZACTIVEQ
@@ -234,6 +240,13 @@ config CPU_FREQ_GOV_INTELLIDEMAND
 	depends on CPU_FREQ
 	help
 	  'intellidemand' - an intelligent ondemand governor
+
+config CPU_FREQ_GOV_INTELLIDEMANDX
+        tristate "'intellidemandX' cpufreq governor"
+        depends on CPU_FREQ
+        help
+          'intellidemandx' - an intelligent ondemand governor with
+	  early suspend/wake code and CPU hotplugging.
 
 config CPU_FREQ_GOV_ADAPTIVE
 	tristate "'adaptive' cpufreq policy governor"

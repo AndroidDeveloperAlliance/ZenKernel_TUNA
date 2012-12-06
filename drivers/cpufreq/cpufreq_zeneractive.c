@@ -90,7 +90,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 25
+#define DEFAULT_UNPLUG_LOAD_CPU1 20
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
@@ -105,15 +105,15 @@ static unsigned long unplug_delay;
 
 /*
  * The minimum amount of time we should be > unplug_load
- * before inserting CPUs. Default is 1/4s.
+ * before inserting CPUs. Default is 60ms.
  */
-#define DEFAULT_INSERT_DELAY (250 * USEC_PER_MSEC)
+#define DEFAULT_INSERT_DELAY (60 * USEC_PER_MSEC)
 static unsigned long insert_delay;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
  */
-#define DEFAULT_MIN_SAMPLE_TIME (30 * USEC_PER_MSEC)
+#define DEFAULT_MIN_SAMPLE_TIME (80 * USEC_PER_MSEC)
 static unsigned long min_sample_time;
 
 /*
@@ -445,19 +445,15 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 
 			 /* Ensure it has been unplug_delay since our last attempt*/
 			for_each_online_cpu(cpu) {
-				if (cpu == 0)
-					continue;
-				else if (cpu > 3)
+				if (cpu == 0 || cpu > 3)
 					continue;
 				//--Have we been below unplug load for unplug_delay?
 				if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay)
 					cpu_down(cpu);
 			}
-			/* No delay for insertion */
+
 			for_each_cpu_not(cpu, &tmp_mask) {
-				if (cpu == 0)
-					continue;
-				else if (cpu > 3)
+				if (cpu == 0 || cpu > 3)
 					continue;
 				//--Have we been above unplug_load for insert delay?
 				if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay)

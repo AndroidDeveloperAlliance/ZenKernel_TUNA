@@ -21,6 +21,7 @@
 #include <linux/rculist.h>
 #include <linux/rcupdate.h>
 #include <linux/opp.h>
+#include <linux/of.h>
 
 /*
  * Internal data structure organization with the OPP layer library is as
@@ -73,6 +74,7 @@ struct opp {
  *		RCU usage: nodes are not modified in the list of device_opp,
  *		however addition is possible and is secured by dev_opp_list_lock
  * @dev:	device pointer
+ * @head:	notifier head to notify the OPP availability changes.
  * @opp_list:	list of opps
  *
  * This is an internal data structure maintaining the link to opps attached to
@@ -83,6 +85,7 @@ struct device_opp {
 	struct list_head node;
 
 	struct device *dev;
+	struct srcu_notifier_head head;
 	struct list_head opp_list;
 };
 
@@ -404,6 +407,7 @@ int opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 		}
 
 		dev_opp->dev = dev;
+		srcu_init_notifier_head(&dev_opp->head);
 		INIT_LIST_HEAD(&dev_opp->opp_list);
 
 		/* Secure the device list modification */
@@ -428,6 +432,11 @@ int opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 	list_add_rcu(&new_opp->node, head);
 	mutex_unlock(&dev_opp_list_lock);
 
+	/*
+	 * Notify the changes in the availability of the operable
+	 * frequency/voltage list.
+	 */
+	srcu_notifier_call_chain(&dev_opp->head, OPP_EVENT_ADD, new_opp);
 	return 0;
 }
 
@@ -453,7 +462,7 @@ int opp_add(struct device *dev, unsigned long freq, unsigned long u_volt)
 static int opp_set_availability(struct device *dev, unsigned long freq,
 		bool availability_req)
 {
-	struct device_opp *tmp_dev_opp, *dev_opp = NULL;
+	struct device_opp *tmp_dev_opp, *dev_opp = ERR_PTR(-ENODEV);
 	struct opp *new_opp, *tmp_opp, *opp = ERR_PTR(-ENODEV);
 	int r = 0;
 
@@ -503,6 +512,14 @@ static int opp_set_availability(struct device *dev, unsigned long freq,
 	list_replace_rcu(&opp->node, &new_opp->node);
 	mutex_unlock(&dev_opp_list_lock);
 	synchronize_rcu();
+
+	/* Notify the change of the OPP availability */
+	if (availability_req)
+		srcu_notifier_call_chain(&dev_opp->head, OPP_EVENT_ENABLE,
+					 new_opp);
+	else
+		srcu_notifier_call_chain(&dev_opp->head, OPP_EVENT_DISABLE,
+					 new_opp);
 
 	/* clean up old opp */
 	new_opp = opp;
@@ -643,3 +660,63 @@ void opp_free_cpufreq_table(struct device *dev,
 	*table = NULL;
 }
 #endif		/* CONFIG_CPU_FREQ */
+
+/**
+ * opp_get_notifier() - find notifier_head of the device with opp
+ * @dev:	device pointer used to lookup device OPPs.
+ */
+struct srcu_notifier_head *opp_get_notifier(struct device *dev)
+{
+	struct device_opp *dev_opp = find_device_opp(dev);
+
+	if (IS_ERR(dev_opp))
+		return ERR_CAST(dev_opp); /* matching type */
+
+	return &dev_opp->head;
+}
+
+#ifdef CONFIG_OF
+/**
+ * of_init_opp_table() - Initialize opp table from device tree
+ * @dev:	device pointer used to lookup device OPPs.
+ *
+ * Register the initial OPP table with the OPP library for given device.
+ */
+int of_init_opp_table(struct device *dev)
+{
+	const struct property *prop;
+	const __be32 *val;
+	int nr;
+
+	prop = of_find_property(dev->of_node, "operating-points", NULL);
+	if (!prop)
+		return -ENODEV;
+	if (!prop->value)
+		return -ENODATA;
+
+	/*
+	 * Each OPP is a set of tuples consisting of frequency and
+	 * voltage like <freq-kHz vol-uV>.
+	 */
+	nr = prop->length / sizeof(u32);
+	if (nr % 2) {
+		dev_err(dev, "%s: Invalid OPP list\n", __func__);
+		return -EINVAL;
+	}
+
+	val = prop->value;
+	while (nr) {
+		unsigned long freq = be32_to_cpup(val++) * 1000;
+		unsigned long volt = be32_to_cpup(val++);
+
+		if (opp_add(dev, freq, volt)) {
+			dev_warn(dev, "%s: Failed to add OPP %ld\n",
+				 __func__, freq);
+			continue;
+		}
+		nr -= 2;
+	}
+
+	return 0;
+}
+#endif

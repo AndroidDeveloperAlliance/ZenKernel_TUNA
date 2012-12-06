@@ -22,6 +22,8 @@ ifdef S_VERSION_BUILD
 EXTRA_CFLAGS += -DS_VERSION_BUILD=$(S_VERSION_BUILD)
 endif
 
+plus_sec := $(call as-instr,.arch_extension sec,+sec)
+
 EXTRA_CFLAGS += -Iarch/arm/mach-omap2
 EXTRA_CFLAGS += -Iarch/arm/plat-omap/include/plat
 EXTRA_CFLAGS += -DCONFIG_TF_TEEC

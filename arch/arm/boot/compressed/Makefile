@@ -5,6 +5,7 @@
 #
 
 OBJS		=
+plus_sec := $(call as-instr,.arch_extension sec,+sec)
 
 # Ensure that mmcif loader code appears early in the image
 # to minimise that number of bocks that have to be read in

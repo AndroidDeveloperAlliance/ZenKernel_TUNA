@@ -45,6 +45,7 @@
 
 #include "../clockdomain.h"
 #include "dss.h"
+#include "gammatable.h"
 #include "dss_features.h"
 #include "dispc.h"
 
@@ -2309,10 +2310,10 @@ int dispc_setup_plane(enum omap_plane plane,
 	} else {
 		/* video plane */
 
-		if (out_width < width / maxdownscale)
+		if (out_width < DIV_ROUND_UP(width, maxdownscale))
 			return -EINVAL;
 
-		if (out_height < height / maxdownscale)
+		if (out_height < DIV_ROUND_UP(height, maxdownscale))
 			return -EINVAL;
 
 		if (color_mode == OMAP_DSS_COLOR_YUV2 ||
@@ -2794,6 +2795,53 @@ bool dispc_trans_key_enabled(enum omap_channel ch)
 	return enabled;
 }
 
+/* valid inputs for gamma are from 1 to 10 that map
+  from 0.2 to 2.2 gamma values and 0 for disabled */
+int dispc_enable_gamma(enum omap_channel ch, u8 gamma)
+{
+#ifdef CONFIG_ARCH_OMAP4
+	bool enabled;
+	u32 i, temp, channel;
+	static bool enable[MAX_DSS_MANAGERS];
+
+	enabled = enable[ch];
+
+	switch (ch) {
+	case OMAP_DSS_CHANNEL_LCD:
+		channel = 0;
+		break;
+	case OMAP_DSS_CHANNEL_LCD2:
+		channel = 1;
+		break;
+	case OMAP_DSS_CHANNEL_DIGIT:
+		channel = 2;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	if (gamma > NO_OF_GAMMA_TABLES || gamma < 0)
+		return -EINVAL;
+
+	if (gamma) {
+		const u8 *tablePtr = gamma_table[gamma - 1];
+
+		for (i = 0; i < GAMMA_TBL_SZ; i++) {
+			temp =  tablePtr[i];
+			temp =  (i<<24)|(temp|(temp<<8)|(temp<<16));
+			dispc_write_reg(DISPC_GAMMA_TABLE + (channel*4), temp);
+		}
+	}
+	enabled = (enabled & ~(1 << channel)) | (gamma ? (1 << channel) : 0);
+	REG_FLD_MOD(DISPC_CONFIG, (enabled & 1), 3, 3);
+	REG_FLD_MOD(DISPC_CONFIG, !!(enabled & 6), 9, 9);
+
+	enable[ch] = enabled;
+
+#endif
+	return 0;
+}
+
 
 void dispc_set_tft_data_lines(enum omap_channel channel, u8 data_lines)
 {
@@ -2957,7 +3005,7 @@ static void dispc_set_lcd_divisor(enum omap_channel channel, u16 lck_div,
 		u16 pck_div)
 {
 	BUG_ON(lck_div < 1);
-	BUG_ON(pck_div < 2);
+	BUG_ON(pck_div < 1);
 
 	dispc_write_reg(DISPC_DIVISORo(channel),
 			FLD_VAL(lck_div, 23, 16) | FLD_VAL(pck_div, 7, 0));
@@ -3320,6 +3368,29 @@ static void _dispc_set_pol_freq(enum omap_channel channel, bool onoff, bool rf,
 	dispc_write_reg(DISPC_POL_FREQ(channel), l);
 }
 
+static void dispc_get_pol_freq(enum omap_channel channel,
+			enum omap_panel_config *config, u8 *acbi, u8 *acb)
+{
+	u32 l = dispc_read_reg(DISPC_POL_FREQ(channel));
+	*config = 0;
+
+	if (FLD_GET(l, 17, 17))
+		*config |= OMAP_DSS_LCD_ONOFF;
+	if (FLD_GET(l, 16, 16))
+		*config |= OMAP_DSS_LCD_RF;
+	if (FLD_GET(l, 15, 15))
+		*config |= OMAP_DSS_LCD_IEO;
+	if (FLD_GET(l, 14, 14))
+		*config |= OMAP_DSS_LCD_IPC;
+	if (FLD_GET(l, 13, 13))
+		*config |= OMAP_DSS_LCD_IHS;
+	if (FLD_GET(l, 12, 12))
+		*config |= OMAP_DSS_LCD_IVS;
+
+	*acbi = FLD_GET(l, 11, 8);
+	*acb = FLD_GET(l, 7, 0);
+}
+
 void dispc_set_pol_freq(enum omap_channel channel,
 		enum omap_panel_config config, u8 acbi, u8 acb)
 {
@@ -3383,7 +3454,7 @@ int dispc_calc_clock_rates(unsigned long dispc_fclk_rate,
 {
 	if (cinfo->lck_div > 255 || cinfo->lck_div == 0)
 		return -EINVAL;
-	if (cinfo->pck_div < 2 || cinfo->pck_div > 255)
+	if (cinfo->pck_div < 1 || cinfo->pck_div > 255)
 		return -EINVAL;
 
 	cinfo->lck = dispc_fclk_rate / cinfo->lck_div;
@@ -3397,6 +3468,16 @@ int dispc_set_clock_div(enum omap_channel channel,
 {
 	DSSDBG("lck = %lu (%u)\n", cinfo->lck, cinfo->lck_div);
 	DSSDBG("pck = %lu (%u)\n", cinfo->pck, cinfo->pck_div);
+
+	/* In case DISPC_CORE_CLK == PCLK, IPC must work on rising edge */
+	if (dss_has_feature(FEAT_CORE_CLK_DIV) &&
+			(cinfo->lck_div * cinfo->pck_div == 1)) {
+		u8 acb, acbi;
+		enum omap_panel_config config;
+		dispc_get_pol_freq(channel, &config, &acbi, &acb);
+		config |= OMAP_DSS_LCD_IPC;
+		dispc_set_pol_freq(channel, config, acbi, acb);
+	}
 
 	dispc_set_lcd_divisor(channel, cinfo->lck_div, cinfo->pck_div);
 

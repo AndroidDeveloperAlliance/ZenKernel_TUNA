@@ -294,8 +294,6 @@ will choose to disable CPU1.
 The governor will not unplug a CPU unless average CPU load
 is less than unplug_load[CPU] for unplug_delay microseconds.
 
-The delay for plugging in CPUs is insert_delay microseconds.
-
 Zeneractive also will suspend all but CPU 0 on early suspend
 and wake up all CPUs on wakeup.
 
@@ -325,10 +323,7 @@ timer_rate: Sample rate for reevaluating cpu load when the system is
 not idle.  Default is 20000 uS.
 
 unplug_delay: How long avg_load should be below unplug_load[cpu] before
-removing a CPU. Default is 5000mS (milliseconds) 
-
-insert_delay: How long avg_load should be above unplug_load[cpu] before
-inserting a CPU. Default is 250mS (milliseconds)
+removing a CPU. Default is 3000mS (milliseconds) 
 
 unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
 Default is 15%

@@ -45,18 +45,15 @@ struct cpufreq_zeneractive_cpuinfo {
 	u64 prev_wall_time;
 	u64 prev_idle_time;
 	u64 prev_iowait_time;
-	u64 target_plug_time;
 	/*
 	 * Measurement for how long avg_load has been
-	 * above and below unplug_load[cpu]
+	 * below unplug_load[cpu]
 	 */
 	unsigned long total_below_unplug_time[3];
-	unsigned long total_above_unplug_time[3];
 	/*
 	 * Last time we were there checking unplug_time
 	 */
 	u64 last_time_below_unplug_time[3];
-	u64 last_time_above_unplug_time[3];
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
@@ -98,17 +95,10 @@ static unsigned int unplug_load[3];
 
 /*
  * The minimum amount of time we should be <= unplug_load
- * before removing CPUs. Default is 5s.
+ * before removing CPUs. Default is 3s.
  */
-#define DEFAULT_UNPLUG_DELAY (5000 * USEC_PER_MSEC)
+#define DEFAULT_UNPLUG_DELAY (3000 * USEC_PER_MSEC)
 static unsigned long unplug_delay;
-
-/*
- * The minimum amount of time we should be > unplug_load
- * before inserting CPUs. Default is 60ms.
- */
-#define DEFAULT_INSERT_DELAY (60 * USEC_PER_MSEC)
-static unsigned long insert_delay;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
@@ -238,6 +228,41 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 
         if (pcpu->target_freq == new_freq) {
 		goto rearm_if_notmax;
+	}
+
+	/*
+	 * Do some more advanced load calculation like ondemand
+	 * to determine total load across all CPUs for hotplugging.
+	 */
+	for_each_cpu(j, pcpu->policy->cpus) {
+		struct cpufreq_zeneractive_cpuinfo *pjcpu =
+			&per_cpu(cpuinfo, j);
+		u64 cur_wall_time, cur_idle_time, cur_iowait_time;
+		unsigned int idle_time, wall_time, iowait_time;
+		unsigned int load;
+
+		pjcpu = &per_cpu(cpuinfo, j);
+
+		cur_idle_time = get_cpu_idle_time_us(j, &cur_wall_time);
+		cur_iowait_time = get_cpu_iowait_time_us(j, &cur_wall_time);
+
+		wall_time = (unsigned int) cputime64_sub(cur_wall_time,
+				pjcpu->prev_wall_time);
+		pjcpu->prev_wall_time = cur_wall_time;
+
+		idle_time = (unsigned int) cputime64_sub(cur_idle_time,
+				pcpu->prev_idle_time);
+		pjcpu->prev_idle_time = cur_idle_time;
+
+		iowait_time = (unsigned int) cputime64_sub(cur_iowait_time,
+				pjcpu->prev_iowait_time);
+		pjcpu->prev_iowait_time = cur_iowait_time;
+
+		if (unlikely(!wall_time || wall_time < idle_time))
+			continue;
+
+		load = 100 * (wall_time - idle_time) / wall_time;
+		total_load+=load;
 	}
 
 	/*
@@ -417,20 +442,13 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 			//--CPU 0 doesn't unplug, we only support up to quad-cores
 			if (cpu == 0 || cpu > 3) continue;
 			if (pcpu->avg_load <= unplug_load[cpu - 1]) {
-				pcpu->total_above_unplug_time[cpu - 1] = 0;
-				pcpu->last_time_above_unplug_time[cpu - 1] = 0;
 				if (!pcpu->last_time_below_unplug_time[cpu - 1])
 					pcpu->last_time_below_unplug_time[cpu - 1] = now;
 				pcpu->total_below_unplug_time[cpu - 1] +=
 					now - pcpu->last_time_below_unplug_time[cpu - 1];
-			}
-			if (pcpu->avg_load > unplug_load[cpu - 1]) {
+			} else {
 				pcpu->total_below_unplug_time[cpu - 1] = 0;
 				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
-                                if (!pcpu->last_time_above_unplug_time[cpu - 1])
-                                        pcpu->last_time_above_unplug_time[cpu - 1] = now;
-                                pcpu->total_above_unplug_time[cpu - 1] +=
-					now - pcpu->last_time_above_unplug_time[cpu - 1];
 			}
 		}
 
@@ -451,12 +469,11 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 				if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay)
 					cpu_down(cpu);
 			}
-
+			/* No delay for insertion */
 			for_each_cpu_not(cpu, &tmp_mask) {
 				if (cpu == 0 || cpu > 3)
 					continue;
-				//--Have we been above unplug_load for insert delay?
-				if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay)
+				if (pcpu->avg_load > unplug_load[cpu - 1])
 					cpu_up(cpu);
 			}
 		}
@@ -654,28 +671,6 @@ static ssize_t store_unplug_delay(struct kobject *kobj,
 static struct global_attr unplug_delay_attr = __ATTR(unplug_delay, 0644,
 		show_unplug_delay, store_unplug_delay);
 
-static ssize_t show_insert_delay(struct kobject *kobj,
-				struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%lu\n", insert_delay);
-}
-
-static ssize_t store_insert_delay(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned long val;
-
-	ret = strict_strtoul(buf, 0, &val);
-	if (ret < 0)
-		return ret;
-	insert_delay = val;
-	return count;
-}
-
-static struct global_attr insert_delay_attr = __ATTR(insert_delay, 0644,
-		show_insert_delay, store_insert_delay);
-
 static ssize_t show_min_sample_time(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
@@ -727,7 +722,6 @@ static struct attribute *zeneractive_attributes[] = {
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
 	&unplug_delay_attr.attr,
-	&insert_delay_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
 	NULL,
@@ -745,33 +739,33 @@ static void zeneractive_suspend(void)
         struct cpufreq_zeneractive_cpuinfo *pcpu;
 
         if (!enabled) return;
-	  if (!suspended) {
+	if (!suspended) {
 		for_each_cpu_not(cpu, cpu_online_mask) {
 			if (cpu == 0) continue;
 			cpu_up(cpu);
 			pr_info("[zeneractive] CPU %d awoken!", cpu);
 		}
 		for_each_cpu(cpu, &tmp_mask) {
-		  pcpu = &per_cpu(cpuinfo, cpu);
-		  smp_rmb();
-		  if (!pcpu->governor_enabled)
-		    continue;
-		  __cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
+			pcpu = &per_cpu(cpuinfo, cpu);
+			smp_rmb();
+			if (!pcpu->governor_enabled)
+			continue;
+			__cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
 		}
-	  } else {
+	} else {
 		for_each_cpu(cpu, &tmp_mask) {
-		  pcpu = &per_cpu(cpuinfo, cpu);
-		  smp_rmb();
-		  if (!pcpu->governor_enabled)
-		    continue;
-		  __cpufreq_driver_target(pcpu->policy, suspendfreq, CPUFREQ_RELATION_H);
+			pcpu = &per_cpu(cpuinfo, cpu);
+			smp_rmb();
+			if (!pcpu->governor_enabled)
+				continue;
+			__cpufreq_driver_target(pcpu->policy, suspendfreq, CPUFREQ_RELATION_H);
 		}
 		for_each_online_cpu(cpu) {
 			if (cpu == 0) continue;
 			cpu_down(cpu);
 			pr_info("[zeneractive] CPU %d down!", cpu);
 		}
-	  }
+	}
 }
 
 static void zeneractive_early_suspend(struct early_suspend *handler) {
@@ -841,7 +835,6 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 				get_cpu_idle_time_us(j,
 					     &pcpu->target_set_time);
 			pcpu->governor_enabled = 1;
-			pcpu->target_plug_time = pcpu->target_set_time;
 			pcpu->total_below_unplug_time[0] = 0;
 			pcpu->total_below_unplug_time[1] = 0;
 			pcpu->total_below_unplug_time[2] = 0;
@@ -918,7 +911,6 @@ static int __init cpufreq_zeneractive_init(void)
 	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
 	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPU3;
 	unplug_delay = DEFAULT_UNPLUG_DELAY;
-	insert_delay = DEFAULT_INSERT_DELAY;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 	timer_rate = DEFAULT_TIMER_RATE;
 

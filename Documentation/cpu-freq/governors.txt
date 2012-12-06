@@ -286,20 +286,21 @@ run-time tunable parameters.
 The CPUfreq governor "zeneractive" behaves exactly the same as
 "interactive" when scaling frequencies.
 
-Zeneractive also hotplugs CPUs based on the current CPU load.
-For example, if unplug_load_cpu1 is set to 15 and current CPU
-load > 15, CPU1 will be enabled. If CPU load is is <=15 CPU1
-will be disabled.
+Zeneractive also hotplugs CPUs based on the average CPU load
+across all CPUs. For example, if unplug_load_cpu1 is set to 15
+and average CPU load is determined to be 10%. The governor
+will choose to disable CPU1.
 
-Zeneractive waits hotplug_delay in between hotplug attempts.
-This means that CPU load will not be compared to unplug_load
-until after hotplug_delay
+The governor will not unplug a CPU unless average CPU load
+is less than unplug_load[CPU] for unplug_delay microseconds.
+
+The delay for plugging in CPUs is insert_delay microseconds.
 
 Zeneractive also will suspend all but CPU 0 on early suspend
 and wake up all CPUs on wakeup.
 
 Hotplugging while awake can be disabled per-CPU by setting 
-unplug_freq_cpu[#] to 0.
+unplug_load_cpu[#] to 0.
 
 The tuneable values for this governor are:
 
@@ -323,8 +324,11 @@ Default is 20000 uS.
 timer_rate: Sample rate for reevaluating cpu load when the system is
 not idle.  Default is 20000 uS.
 
-hotplug_delay: How long we should wait between hotplug attempts.
-Default is 80000 uS.
+unplug_delay: How long avg_load should be below unplug_load[cpu] before
+removing a CPU. Default is 5000mS (milliseconds) 
+
+insert_delay: How long avg_load should be above unplug_load[cpu] before
+inserting a CPU. Default is 250mS (milliseconds)
 
 unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
 Default is 15%

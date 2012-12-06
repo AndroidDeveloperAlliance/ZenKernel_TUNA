@@ -27,6 +27,25 @@ config IRQ_WORK
 	bool
 	depends on HAVE_IRQ_WORK
 
+menu "Zen options"
+
+config ZEN_INFO_SYFS_INTERFACE
+	bool "Zen Info sysfs interface"
+	---help---
+	  This is simply used to provide information about the kernel
+	  to the UI in a reliable way. If you are unsure what to do
+	  here, please say N here.
+
+config ZEN_INFO_VERSION_CODE
+	int "Zen version code"
+	default 0
+	---help---
+	  Specify the version code of the zen kernel this is. If you
+	  are not building an official  kernel, you should probably
+	  exclude this option and the sysfs interface.	   
+ 
+endmenu
+
 menu "General setup"
 
 config EXPERIMENTAL

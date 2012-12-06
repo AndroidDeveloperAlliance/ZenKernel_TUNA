@@ -42,11 +42,25 @@ struct cpufreq_zeneractive_cpuinfo {
 	u64 time_in_idle_timestamp;
 	u64 target_set_time;
 	u64 target_set_time_in_idle;
+	u64 prev_wall_time;
+	u64 prev_idle_time;
+	u64 prev_iowait_time;
 	u64 target_plug_time;
+	/*
+	 * Measurement for how long avg_load has been
+	 * above and below unplug_load[cpu]
+	 */
+	unsigned long total_below_unplug_time[3];
+	unsigned long total_above_unplug_time[3];
+	/*
+	 * Last time we were there checking unplug_time
+	 */
+	u64 last_time_below_unplug_time[3];
+	u64 last_time_above_unplug_time[3];
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
-	unsigned int cur_load;
+	unsigned int avg_load;
 	int governor_enabled;
 };
 
@@ -76,18 +90,25 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 15
+#define DEFAULT_UNPLUG_LOAD_CPU1 25
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
 static unsigned int unplug_load[3];
 
 /*
- * The minimum amount of time between unplug/hotplug load checks.
- * Lower is more aggressive.
+ * The minimum amount of time we should be <= unplug_load
+ * before removing CPUs. Default is 5s.
  */
-#define DEFAULT_HOTPLUG_DELAY (80 * USEC_PER_MSEC)
-static unsigned long hotplug_delay;
+#define DEFAULT_UNPLUG_DELAY (5000 * USEC_PER_MSEC)
+static unsigned long unplug_delay;
+
+/*
+ * The minimum amount of time we should be > unplug_load
+ * before inserting CPUs. Default is 1/4s.
+ */
+#define DEFAULT_INSERT_DELAY (250 * USEC_PER_MSEC)
+static unsigned long insert_delay;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
@@ -135,6 +156,7 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	u64 now;
 	unsigned int delta_idle;
 	unsigned int delta_time;
+	unsigned int total_load;
 	int cpu_load;
 	int load_since_change;
 	struct cpufreq_zeneractive_cpuinfo *pcpu =
@@ -142,7 +164,10 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	u64 now_idle;
 	unsigned int new_freq;
 	unsigned int index;
+	unsigned int j;
 	unsigned long flags;
+
+	total_load = 0;
 
 	smp_rmb();
 
@@ -215,6 +240,41 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 		goto rearm_if_notmax;
 	}
 
+	/*
+	 * Do some more advanced load calculation like ondemand
+	 * to determine total load across all CPUs for hotplugging.
+	 */
+	for_each_cpu(j, pcpu->policy->cpus) {
+		struct cpufreq_zeneractive_cpuinfo *pjcpu =
+			&per_cpu(cpuinfo, j);
+		u64 cur_wall_time, cur_idle_time, cur_iowait_time;
+		unsigned int idle_time, wall_time, iowait_time;
+		unsigned int load;
+
+		pjcpu = &per_cpu(cpuinfo, j);
+
+		cur_idle_time = get_cpu_idle_time_us(j, &cur_wall_time);
+		cur_iowait_time = get_cpu_iowait_time_us(j, &cur_wall_time);
+
+		wall_time = (unsigned int) cputime64_sub(cur_wall_time,
+				pjcpu->prev_wall_time);
+		pjcpu->prev_wall_time = cur_wall_time;
+
+		idle_time = (unsigned int) cputime64_sub(cur_idle_time,
+				pcpu->prev_idle_time);
+		pjcpu->prev_idle_time = cur_idle_time;
+
+		iowait_time = (unsigned int) cputime64_sub(cur_iowait_time,
+				pjcpu->prev_iowait_time);
+		pjcpu->prev_iowait_time = cur_iowait_time;
+
+		if (unlikely(!wall_time || wall_time < idle_time))
+			continue;
+
+		load = 100 * (wall_time - idle_time) / wall_time;
+		total_load+=load;
+	}
+
         pcpu->target_set_time_in_idle = now_idle;
         pcpu->target_set_time = now;
 
@@ -224,7 +284,8 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
 	wake_up_process(speedchange_task);
 
-	pcpu->cur_load = cpu_load;
+	/* Calculate average load across all CPUs */
+	pcpu->avg_load = total_load / num_online_cpus();
 	spin_lock_irqsave(&hotplug_cpumask_lock, flags);
 	cpumask_set_cpu(data, &hotplug_cpumask);
 	spin_unlock_irqrestore(&hotplug_cpumask_lock, flags);
@@ -349,31 +410,57 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		now_idle = get_cpu_idle_time_us(smp_processor_id(), &now);
 
 		/*
-		 * Do not make any attempt at hotplugging until hotplug_delay
-		 * has passed. If we're suspending, don't do it either.
+		 * Perform some logic to determine the last time we were below
+		 * unplug_load[cpu] and increment how long we've been there
 		 */
-		if (!suspended && now - pcpu->target_plug_time > hotplug_delay) {
-			/* We're making a hotplug attempt @ now */
-			pcpu->target_plug_time = now;
+		for_each_cpu(cpu, &tmp_mask) {
+			//--CPU 0 doesn't unplug, we only support up to quad-cores
+			if (cpu == 0 || cpu > 3) continue;
+			if (pcpu->avg_load <= unplug_load[cpu - 1]) {
+				pcpu->total_above_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_above_unplug_time[cpu - 1] = 0;
+				if (!pcpu->last_time_below_unplug_time[cpu - 1])
+					pcpu->last_time_below_unplug_time[cpu - 1] = now;
+				pcpu->total_below_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_below_unplug_time[cpu - 1];
+			}
+			if (pcpu->avg_load > unplug_load[cpu - 1]) {
+				pcpu->total_below_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
+                                if (!pcpu->last_time_above_unplug_time[cpu - 1])
+                                        pcpu->last_time_above_unplug_time[cpu - 1] = now;
+                                pcpu->total_above_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_above_unplug_time[cpu - 1];
+			}
+		}
 
+		/*
+		 * If suspending/suspended don't hotplug now
+		 */
+		if (!suspended) {
 			/*
 	 		 * If CPU load is at or below the unplug load for CPU X
 			 * remove it, otherwise add it.
 			 */
+
+			 /* Ensure it has been unplug_delay since our last attempt*/
 			for_each_online_cpu(cpu) {
 				if (cpu == 0)
 					continue;
 				else if (cpu > 3)
 					continue;
-				if (pcpu->cur_load <= unplug_load[cpu - 1])
+				//--Have we been below unplug load for unplug_delay?
+				if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay)
 					cpu_down(cpu);
 			}
+			/* No delay for insertion */
 			for_each_cpu_not(cpu, &tmp_mask) {
 				if (cpu == 0)
 					continue;
 				else if (cpu > 3)
 					continue;
-				if (pcpu->cur_load > unplug_load[cpu - 1])
+				//--Have we been above unplug_load for insert delay?
+				if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay)
 					cpu_up(cpu);
 			}
 		}
@@ -549,13 +636,13 @@ static ssize_t store_unplug_load_cpu3(struct kobject *kobj,
 static struct global_attr unplug_load_cpu3_attr = __ATTR(unplug_load_cpu3, 0644,
 	show_unplug_load_cpu3, store_unplug_load_cpu3);
 
-static ssize_t show_hotplug_delay(struct kobject *kobj,
+static ssize_t show_unplug_delay(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", min_sample_time);
+	return sprintf(buf, "%lu\n", unplug_delay);
 }
 
-static ssize_t store_hotplug_delay(struct kobject *kobj,
+static ssize_t store_unplug_delay(struct kobject *kobj,
 			struct attribute *attr, const char *buf, size_t count)
 {
 	int ret;
@@ -564,12 +651,34 @@ static ssize_t store_hotplug_delay(struct kobject *kobj,
 	ret = strict_strtoul(buf, 0, &val);
 	if (ret < 0)
 		return ret;
-	hotplug_delay = val;
+	unplug_delay = val;
 	return count;
 }
 
-static struct global_attr hotplug_delay_attr = __ATTR(hotplug_delay, 0644,
-		show_hotplug_delay, store_hotplug_delay);
+static struct global_attr unplug_delay_attr = __ATTR(unplug_delay, 0644,
+		show_unplug_delay, store_unplug_delay);
+
+static ssize_t show_insert_delay(struct kobject *kobj,
+				struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", insert_delay);
+}
+
+static ssize_t store_insert_delay(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = strict_strtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	insert_delay = val;
+	return count;
+}
+
+static struct global_attr insert_delay_attr = __ATTR(insert_delay, 0644,
+		show_insert_delay, store_insert_delay);
 
 static ssize_t show_min_sample_time(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -621,7 +730,8 @@ static struct attribute *zeneractive_attributes[] = {
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
-	&hotplug_delay_attr.attr,
+	&unplug_delay_attr.attr,
+	&insert_delay_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
 	NULL,
@@ -728,13 +838,21 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 			pcpu = &per_cpu(cpuinfo, j);
 			pcpu->policy = policy;
 			pcpu->target_freq = policy->cur;
+			pcpu->prev_idle_time = get_cpu_idle_time_us(j, &pcpu->prev_wall_time);
+			pcpu->prev_iowait_time = get_cpu_iowait_time_us(j, &pcpu->prev_wall_time);
 			pcpu->freq_table = freq_table;
 			pcpu->target_set_time_in_idle =
 				get_cpu_idle_time_us(j,
 					     &pcpu->target_set_time);
 			pcpu->governor_enabled = 1;
-			pcpu->target_plug_time = ktime_to_us(ktime_get());
-			pcpu->cur_load = 0;
+			pcpu->target_plug_time = pcpu->target_set_time;
+			pcpu->total_below_unplug_time[0] = 0;
+			pcpu->total_below_unplug_time[1] = 0;
+			pcpu->total_below_unplug_time[2] = 0;
+			pcpu->last_time_below_unplug_time[0] = 0;
+			pcpu->last_time_below_unplug_time[1] = 0;
+			pcpu->last_time_below_unplug_time[2] = 0;
+			pcpu->avg_load = 0;
 			smp_wmb();
 			pcpu->cpu_timer.expires =
 				jiffies + usecs_to_jiffies(timer_rate);
@@ -803,7 +921,8 @@ static int __init cpufreq_zeneractive_init(void)
 	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
 	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
 	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPU3;
-	hotplug_delay = DEFAULT_HOTPLUG_DELAY;
+	unplug_delay = DEFAULT_UNPLUG_DELAY;
+	insert_delay = DEFAULT_INSERT_DELAY;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 	timer_rate = DEFAULT_TIMER_RATE;
 

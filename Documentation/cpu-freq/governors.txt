@@ -325,6 +325,9 @@ Default is 20000 uS.
 timer_rate: Sample rate for reevaluating cpu load when the system is
 not idle.  Default is 20000 uS.
 
+suspend_frequency: The target frequency we should apply when going into
+suspend.
+
 unplug_delay: How long CPU load should be below/equal to unplug_load[cpu] 
 before removing a CPU. Default is 5s. 
 

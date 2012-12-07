@@ -75,11 +75,13 @@ static spinlock_t hotplug_cpumask_lock;
 /* used for suspend code */
 static unsigned int suspended = 0;
 static unsigned int enabled = 0;
-static unsigned int suspendfreq = 729600;
 static unsigned int registration = 0;
 
 /* Hi speed to bump to from lo speed when load burst (default max) */
 static unsigned int hispeed_freq;
+
+/* What speed we should suspend at */
+static unsigned int suspend_frequency = 729600;
 
 /* Go to hi speed when CPU load at or above this value. */
 #define DEFAULT_GO_HISPEED_LOAD 85
@@ -522,6 +524,34 @@ static ssize_t store_go_hispeed_load(struct kobject *kobj,
 static struct global_attr go_hispeed_load_attr = __ATTR(go_hispeed_load, 0644,
 		show_go_hispeed_load, store_go_hispeed_load);
 
+static ssize_t show_suspend_frequency(struct kobject *kobj,
+				   struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", suspend_frequency);
+}
+
+static ssize_t store_suspend_frequency(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+struct cpufreq_zeneractive_cpuinfo *pcpu = &per_cpu(cpuinfo, smp_processor_id());
+	unsigned int input;
+	int index;
+
+	sscanf(buf, "%u\n", &input);
+	if (input < 0) return count;
+
+	cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
+					input, CPUFREQ_RELATION_H,
+					&index);
+
+	suspend_frequency = pcpu->freq_table[index].frequency;
+
+	return count;
+}
+
+static struct global_attr suspend_frequency_attr = __ATTR(suspend_frequency, 0644,
+	show_suspend_frequency, store_suspend_frequency);
+
 static ssize_t show_unplug_load_cpu1(struct kobject *kobj,
 				     struct attribute *attr, char *buf)
 {
@@ -679,6 +709,7 @@ static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 static struct attribute *zeneractive_attributes[] = {
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
+	&suspend_frequency_attr.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
@@ -696,36 +727,35 @@ static struct attribute_group zeneractive_attr_group = {
 
 static void zeneractive_suspend(void)
 {
-        unsigned int cpu;
-        cpumask_t tmp_mask;
-        struct cpufreq_zeneractive_cpuinfo *pcpu;
+	unsigned int cpu;
+	cpumask_t tmp_mask;
+	struct cpufreq_zeneractive_cpuinfo *pcpu;
 
-        if (!enabled) return;
-	  if (!suspended) {
+	if (!enabled)
+		return;
+	if (!suspended) {
 		for_each_cpu_not(cpu, cpu_online_mask) {
 			if (cpu == 0) continue;
 			cpu_up(cpu);
-			pr_info("[zeneractive] CPU %d awoken!", cpu);
 		}
 		for_each_cpu(cpu, &tmp_mask) {
-		  pcpu = &per_cpu(cpuinfo, cpu);
-		  smp_rmb();
-		  if (!pcpu->governor_enabled)
-		    continue;
-		  __cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
+			pcpu = &per_cpu(cpuinfo, cpu);
+			smp_rmb();
+			if (!pcpu->governor_enabled)
+				continue;
+			__cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
 		}
-	  } else {
+	} else {
 		for_each_cpu(cpu, &tmp_mask) {
-		  pcpu = &per_cpu(cpuinfo, cpu);
-		  smp_rmb();
-		  if (!pcpu->governor_enabled)
-		    continue;
-		  __cpufreq_driver_target(pcpu->policy, suspendfreq, CPUFREQ_RELATION_H);
+			pcpu = &per_cpu(cpuinfo, cpu);
+			smp_rmb();
+			if (!pcpu->governor_enabled)
+				continue;
+			__cpufreq_driver_target(pcpu->policy, suspend_frequency, CPUFREQ_RELATION_H);
 		}
 		for_each_online_cpu(cpu) {
 			if (cpu == 0) continue;
 			cpu_down(cpu);
-			pr_info("[zeneractive] CPU %d down!", cpu);
 		}
 	  }
 }
@@ -743,29 +773,29 @@ static void zeneractive_late_resume(struct early_suspend *handler) {
 }
 
 static struct early_suspend zeneractive_power_suspend = {
-        .suspend = zeneractive_early_suspend,
-        .resume = zeneractive_late_resume,
-        .level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1,
+	.suspend = zeneractive_early_suspend,
+	.resume = zeneractive_late_resume,
+	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1,
 };
 
 static int cpufreq_zeneractive_idle_notifier(struct notifier_block *nb,
                                              unsigned long val,
                                              void *data)
 {
-        switch (val) {
-        case IDLE_START:
-                cpufreq_zeneractive_idle_start();
-                break;
-        case IDLE_END:
-                cpufreq_zeneractive_idle_end();
-                break;
-        }
+	switch (val) {
+		case IDLE_START:
+			cpufreq_zeneractive_idle_start();
+			break;
+		case IDLE_END:
+			cpufreq_zeneractive_idle_end();
+			break;
+	}
 
 	return 0;
 }
 
 static struct notifier_block cpufreq_zeneractive_idle_nb = {
-        .notifier_call = cpufreq_zeneractive_idle_notifier,
+	.notifier_call = cpufreq_zeneractive_idle_notifier,
 };
 
 static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
@@ -822,10 +852,9 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 
 		enabled = 1;
 		registration = 1;
-                register_early_suspend(&zeneractive_power_suspend);
+		register_early_suspend(&zeneractive_power_suspend);
 		registration = 0;
 		idle_notifier_register(&cpufreq_zeneractive_idle_nb);
-                pr_info("[imoseyon] zeneractive start\n");
 		break;
 
 	case CPUFREQ_GOV_STOP:
@@ -844,8 +873,7 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 				&zeneractive_attr_group);
 
 		enabled = 0;
-                unregister_early_suspend(&zeneractive_power_suspend);
-                pr_info("[imoseyon] zeneractive inactive\n");
+		unregister_early_suspend(&zeneractive_power_suspend);
 		break;
 
 	case CPUFREQ_GOV_LIMITS:

@@ -337,7 +337,6 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 	u64 now;
 	unsigned int cpu;
 	unsigned long flags;
-	int j;
 	struct cpufreq_zeneractive_cpuinfo *pcpu;
 
 	while (1) {
@@ -374,26 +373,25 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		/*
 		 * Calculate how long we've been above or below the unplug_load
 		 * per CPU, so we can see if it has exceeded the unplug or insert delay.
-		 *
-		 * TODO: Use for_each_cpu instead of calculating load for all possible CPUs?
 		 */
-		for (j = 0; j < 3; j++) {
-			if (pcpu->cur_load <= unplug_load[j]) {
+		for_each_cpu(cpu, cpu_possible_mask) {
+			if (cpu == 0 || cpu > 3) continue;
+			if (pcpu->cur_load <= unplug_load[cpu - 1]) {
 				/* Below: reset above counter */
-				pcpu->total_above_unplug_time[j] = 0;
-				pcpu->last_time_above_unplug_time[j] = 0;
-				if (!pcpu->last_time_below_unplug_time[j])
-					pcpu->last_time_below_unplug_time[j] = now;
-				pcpu->total_below_unplug_time[j] +=
-					now - pcpu->last_time_below_unplug_time[j];
+				pcpu->total_above_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_above_unplug_time[cpu - 1] = 0;
+				if (!pcpu->last_time_below_unplug_time[cpu - 1])
+					pcpu->last_time_below_unplug_time[cpu - 1] = now;
+				pcpu->total_below_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_below_unplug_time[cpu - 1];
 			}
-			if (pcpu->cur_load > unplug_load[j]) {
-				pcpu->total_below_unplug_time[j] = 0;
-				pcpu->last_time_below_unplug_time[j] = 0;
-                                if (!pcpu->last_time_above_unplug_time[j])
-                                        pcpu->last_time_above_unplug_time[j] = now;
-                                pcpu->total_above_unplug_time[j] +=
-					now - pcpu->last_time_above_unplug_time[j];
+			if (pcpu->cur_load > unplug_load[cpu - 1]) {
+				pcpu->total_below_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
+                                if (!pcpu->last_time_above_unplug_time[cpu - 1])
+                                        pcpu->last_time_above_unplug_time[cpu - 1] = now;
+                                pcpu->total_above_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_above_unplug_time[cpu - 1];
 			}
 		}
 

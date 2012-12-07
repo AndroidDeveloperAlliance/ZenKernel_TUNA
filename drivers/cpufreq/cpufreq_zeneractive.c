@@ -88,7 +88,7 @@ static unsigned int suspend_frequency = 729600;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 25
+#define DEFAULT_UNPLUG_LOAD_CPU1 30
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
@@ -105,7 +105,7 @@ static unsigned long unplug_delay;
  * The minimum amount of time we should be > unplug_load
  * before inserting CPUs. Default is 30ms.
  */
-#define DEFAULT_INSERT_DELAY (30 * USEC_PER_MSEC)
+#define DEFAULT_INSERT_DELAY (80 * USEC_PER_MSEC)
 static unsigned long insert_delay;
 
 /*
@@ -388,9 +388,9 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 			if (pcpu->cur_load > unplug_load[cpu - 1]) {
 				pcpu->total_below_unplug_time[cpu - 1] = 0;
 				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
-                                if (!pcpu->last_time_above_unplug_time[cpu - 1])
-                                        pcpu->last_time_above_unplug_time[cpu - 1] = now;
-                                pcpu->total_above_unplug_time[cpu - 1] +=
+				if (!pcpu->last_time_above_unplug_time[cpu - 1])
+					pcpu->last_time_above_unplug_time[cpu - 1] = now;
+				pcpu->total_above_unplug_time[cpu - 1] +=
 					now - pcpu->last_time_above_unplug_time[cpu - 1];
 			}
 		}
@@ -728,6 +728,7 @@ static void zeneractive_suspend(void)
 	unsigned int cpu;
 	cpumask_t tmp_mask;
 	struct cpufreq_zeneractive_cpuinfo *pcpu;
+	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
 	if (!enabled)
 		return;
@@ -743,7 +744,16 @@ static void zeneractive_suspend(void)
 				continue;
 			__cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
 		}
+		/* Wakeup hotplug task */
+		hotplug_task = kthread_create(cpufreq_zeneractive_hotplug_task, NULL,
+									"hpzeneractive");
+		sched_setscheduler_nocheck(hotplug_task, SCHED_FIFO, &param);
+		get_task_struct(hotplug_task);
+		wake_up_process(hotplug_task);
 	} else {
+		/* Destroy hotplug task */
+		kthread_stop(hotplug_task);
+		put_task_struct(hotplug_task);
 		for_each_cpu(cpu, &tmp_mask) {
 			pcpu = &per_cpu(cpuinfo, cpu);
 			smp_rmb();
@@ -960,6 +970,6 @@ static void __exit cpufreq_zeneractive_exit(void)
 module_exit(cpufreq_zeneractive_exit);
 
 MODULE_AUTHOR("Mike Chan <mike@android.com>");
-MODULE_DESCRIPTION("'cpufreq_interactive' - A cpufreq governor for "
+MODULE_DESCRIPTION("'cpufreq_zeneractive' - A cpufreq governor for "
 	"Latency sensitive workloads");
 MODULE_LICENSE("GPL");

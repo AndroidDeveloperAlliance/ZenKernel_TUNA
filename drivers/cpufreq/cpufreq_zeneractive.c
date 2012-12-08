@@ -14,7 +14,6 @@
  *
  * Author: Mike Chan (mike@android.com)
  * Author: Brandon Berhent (bbedward@gmail.com)
- * early suspend code based on interactiveX by imoseyon (imoseyon@gmail.com)
  */
 
 #include <linux/cpu.h>
@@ -29,7 +28,6 @@
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/mutex.h>
-#include <linux/earlysuspend.h>
 
 #include <asm/cputime.h>
 
@@ -72,16 +70,8 @@ static struct task_struct *hotplug_task;
 static cpumask_t hotplug_cpumask;
 static spinlock_t hotplug_cpumask_lock;
 
-/* used for suspend code */
-static unsigned int suspended = 0;
-static unsigned int enabled = 0;
-static unsigned int registration = 0;
-
 /* Hi speed to bump to from lo speed when load burst (default max) */
 static unsigned int hispeed_freq;
-
-/* What speed we should suspend at */
-static unsigned int suspend_frequency = 729600;
 
 /* Go to hi speed when CPU load at or above this value. */
 #define DEFAULT_GO_HISPEED_LOAD 85
@@ -364,10 +354,6 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		if (!pcpu->governor_enabled)
 			continue;
 
-		/* Skip live hotplug logic if suspended */
-		if (suspended)
-			continue;
-
 		get_cpu_idle_time_us(smp_processor_id(), &now);
 
 		/*
@@ -521,34 +507,6 @@ static ssize_t store_go_hispeed_load(struct kobject *kobj,
 
 static struct global_attr go_hispeed_load_attr = __ATTR(go_hispeed_load, 0644,
 		show_go_hispeed_load, store_go_hispeed_load);
-
-static ssize_t show_suspend_frequency(struct kobject *kobj,
-				   struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%u\n", suspend_frequency);
-}
-
-static ssize_t store_suspend_frequency(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-struct cpufreq_zeneractive_cpuinfo *pcpu = &per_cpu(cpuinfo, smp_processor_id());
-	unsigned int input;
-	int index;
-
-	sscanf(buf, "%u\n", &input);
-	if (input < 0) return count;
-
-	cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
-					input, CPUFREQ_RELATION_H,
-					&index);
-
-	suspend_frequency = pcpu->freq_table[index].frequency;
-
-	return count;
-}
-
-static struct global_attr suspend_frequency_attr = __ATTR(suspend_frequency, 0644,
-	show_suspend_frequency, store_suspend_frequency);
 
 static ssize_t show_unplug_load_cpu1(struct kobject *kobj,
 				     struct attribute *attr, char *buf)
@@ -707,7 +665,6 @@ static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 static struct attribute *zeneractive_attributes[] = {
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
-	&suspend_frequency_attr.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
@@ -721,69 +678,6 @@ static struct attribute *zeneractive_attributes[] = {
 static struct attribute_group zeneractive_attr_group = {
 	.attrs = zeneractive_attributes,
 	.name = "zeneractive",
-};
-
-static void zeneractive_suspend(void)
-{
-	unsigned int cpu;
-	cpumask_t tmp_mask;
-	struct cpufreq_zeneractive_cpuinfo *pcpu;
-	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
-
-	if (!enabled)
-		return;
-	if (!suspended) {
-		for_each_cpu_not(cpu, cpu_online_mask) {
-			if (cpu == 0) continue;
-			cpu_up(cpu);
-		}
-		for_each_cpu(cpu, &tmp_mask) {
-			pcpu = &per_cpu(cpuinfo, cpu);
-			smp_rmb();
-			if (!pcpu->governor_enabled)
-				continue;
-			__cpufreq_driver_target(pcpu->policy, hispeed_freq, CPUFREQ_RELATION_L);
-		}
-		/* Wakeup hotplug task */
-		hotplug_task = kthread_create(cpufreq_zeneractive_hotplug_task, NULL,
-									"hpzeneractive");
-		sched_setscheduler_nocheck(hotplug_task, SCHED_FIFO, &param);
-		get_task_struct(hotplug_task);
-		wake_up_process(hotplug_task);
-	} else {
-		/* Destroy hotplug task */
-		kthread_stop(hotplug_task);
-		put_task_struct(hotplug_task);
-		for_each_cpu(cpu, &tmp_mask) {
-			pcpu = &per_cpu(cpuinfo, cpu);
-			smp_rmb();
-			if (!pcpu->governor_enabled)
-				continue;
-			__cpufreq_driver_target(pcpu->policy, suspend_frequency, CPUFREQ_RELATION_H);
-		}
-		for_each_online_cpu(cpu) {
-			if (cpu == 0) continue;
-			cpu_down(cpu);
-		}
-	  }
-}
-
-static void zeneractive_early_suspend(struct early_suspend *handler) {
-	if (!registration) {
-		suspended = 1;
-		zeneractive_suspend();
-	}
-}
-
-static void zeneractive_late_resume(struct early_suspend *handler) {
-	suspended = 0;
-	zeneractive_suspend();
-}
-
-static struct early_suspend zeneractive_power_suspend = {
-	.suspend = zeneractive_early_suspend,
-	.resume = zeneractive_late_resume,
-	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1,
 };
 
 static int cpufreq_zeneractive_idle_notifier(struct notifier_block *nb,
@@ -858,10 +752,6 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 		if (rc)
 			return rc;
 
-		enabled = 1;
-		registration = 1;
-		register_early_suspend(&zeneractive_power_suspend);
-		registration = 0;
 		idle_notifier_register(&cpufreq_zeneractive_idle_nb);
 		break;
 
@@ -880,8 +770,6 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 		sysfs_remove_group(cpufreq_global_kobject,
 				&zeneractive_attr_group);
 
-		enabled = 0;
-		unregister_early_suspend(&zeneractive_power_suspend);
 		break;
 
 	case CPUFREQ_GOV_LIMITS:

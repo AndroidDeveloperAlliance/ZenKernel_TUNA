@@ -747,7 +747,7 @@ static void s6e8aa0_setup_dy_regs(struct s6e8aa0_data *s6, int c,
 static void s6e8aa0_setup_gamma_regs(struct s6e8aa0_data *s6, u8 gamma_regs[],
 				     u8 dy_regs[3][NUM_DY_REGS + 1])
 {
-	int c, i;
+	int c, i, adj_hack;
 	u8 brightness = s6->bl;
 	const struct s6e8aa0_gamma_adj_points *bv = s6->gamma_adj_points;
 
@@ -770,10 +770,10 @@ static void s6e8aa0_setup_gamma_regs(struct s6e8aa0_data *s6, u8 gamma_regs[],
 			adj = clamp_t(int, adj, adj_min, adj_max);
 		}
 #ifdef CONFIG_COLOR_HACK
-        int adj_hack = adj + ((hacky_v1_offset[c] * (int)adj) / 100);
-        if (adj_hack > adj_max)
-            adj_hack = adj_max;
-        gamma_regs[gamma_reg_index(c, V1)] = adj_hack;
+		adj_hack = adj + ((hacky_v1_offset[c] * (int)adj) / 100);
+		if (adj_hack > adj_max)
+			adj_hack = adj_max;
+		gamma_regs[gamma_reg_index(c, V1)] = adj_hack;
 #else
 		gamma_regs[gamma_reg_index(c, V1)] = adj;
 #endif

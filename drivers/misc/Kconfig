@@ -610,12 +610,6 @@ config VIBRATOR_CONTROL
 	help
 	  Say Y here to enable Vibrator Control
 
-config COLOR_CONTROL
-	bool "Support for Color Control"
-	default y
-	help
-	  Say Y here to enable Color Control
-
 config TOUCH_WAKE
 	bool "Support for Touch Wake"
 	default y

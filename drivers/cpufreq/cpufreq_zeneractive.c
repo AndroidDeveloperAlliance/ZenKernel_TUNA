@@ -93,19 +93,19 @@ static unsigned long go_hispeed_load;
 static unsigned int unplug_load[3];
 
 /* Target load.  Lower values result in higher CPU speeds. */
-#define DEFAULT_TARGET_LOAD 90
+#define DEFAULT_TARGET_LOAD 100
 static unsigned long target_load = DEFAULT_TARGET_LOAD;
 
 /*
  * The minimum amount of time we should be <= unplug_load
- * before removing CPUs. Default is 5s.
+ * before removing CPUs.
  */
 #define DEFAULT_UNPLUG_DELAY (5000 * USEC_PER_MSEC)
 static unsigned long unplug_delay;
 
 /*
  * The minimum amount of time we should be > unplug_load
- * before inserting CPUs. Default is 30ms.
+ * before inserting CPUs.
  */
 #define DEFAULT_INSERT_DELAY (80 * USEC_PER_MSEC)
 static unsigned long insert_delay;
@@ -275,7 +275,6 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
 	wake_up_process(speedchange_task);
 
-	/* Use long-term load for hotplugging code */
 	pcpu->cur_load = load_since_change;
 	spin_lock_irqsave(&hotplug_cpumask_lock, flags);
 	cpumask_set_cpu(data, &hotplug_cpumask);
@@ -445,6 +444,13 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 			if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay)
 				cpu_up(cpu);
 		}
+	}
+
+	/* Bring up all CPUs */
+	for_each_cpu_not(cpu, cpu_online_mask) {
+		if (cpu == 0)
+			continue;
+		cpu_up(cpu);
 	}
 
 	return 0;

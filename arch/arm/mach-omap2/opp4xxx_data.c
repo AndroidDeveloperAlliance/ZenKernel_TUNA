@@ -156,7 +156,7 @@ static struct omap_opp_def __initdata omap443x_opp_def_list[] = {
 // Lower or default clock frequency == Undervolted
 #define OMAP4460_VDD_MPU_OPPBASE_UV		900000
 #define OMAP4460_VDD_MPU_OPP25_UV		950000
-#define OMAP4460_VDD_MPU_OPP50_UV		975000
+#define OMAP4460_VDD_MPU_OPP50_UV		1025000
 #define OMAP4460_VDD_MPU_OPP100_UV		1150000
 #define OMAP4460_VDD_MPU_OPPTURBO_UV		1200000
 

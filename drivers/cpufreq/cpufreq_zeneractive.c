@@ -29,7 +29,6 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
-#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <asm/cputime.h>
 
@@ -72,6 +71,7 @@ static DEFINE_PER_CPU(struct cpufreq_zeneractive_cpuinfo, cpuinfo);
 static struct task_struct *speedchange_task;
 static cpumask_t speedchange_cpumask;
 static spinlock_t speedchange_cpumask_lock;
+static struct mutex set_speed_lock;
 
 /* realtime thread handles hotplugging */
 static struct task_struct *hotplug_task;
@@ -86,7 +86,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 30
+#define DEFAULT_UNPLUG_LOAD_CPU1 35
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
@@ -107,7 +107,7 @@ static unsigned long unplug_delay;
  * The minimum amount of time we should be > unplug_load
  * before inserting CPUs.
  */
-#define DEFAULT_INSERT_DELAY (80 * USEC_PER_MSEC)
+#define DEFAULT_INSERT_DELAY (100 * USEC_PER_MSEC)
 static unsigned long insert_delay;
 
 /*
@@ -433,16 +433,22 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 			if (cpu == 0 || cpu > 3)
 				continue;
 			//--Have we been below unplug load for unplug_delay?
-			if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay)
+			if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay) {
+				mutex_lock(&set_speed_lock);
 				cpu_down(cpu);
+				mutex_unlock(&set_speed_lock);
+			}
 		}
 
 		for_each_cpu_not(cpu, cpu_online_mask) {
 			if (cpu == 0 || cpu > 3)
 				continue;
 			//--Have we been above unplug_load for insert delay?
-			if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay)
+			if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay) {
+				mutex_lock(&set_speed_lock);
 				cpu_up(cpu);
+				mutex_unlock(&set_speed_lock);
+			}
 		}
 	}
 
@@ -450,7 +456,9 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 	for_each_cpu_not(cpu, cpu_online_mask) {
 		if (cpu == 0)
 			continue;
+		mutex_lock(&set_speed_lock);
 		cpu_up(cpu);
+		mutex_unlock(&set_speed_lock);
 	}
 
 	return 0;
@@ -493,6 +501,8 @@ static int cpufreq_zeneractive_speedchange_task(void *data)
 			if (!pcpu->governor_enabled)
 				continue;
 
+			mutex_lock(&set_speed_lock);
+
 			for_each_cpu(j, pcpu->policy->cpus) {
 				struct cpufreq_zeneractive_cpuinfo *pjcpu =
 					&per_cpu(cpuinfo, j);
@@ -505,6 +515,7 @@ static int cpufreq_zeneractive_speedchange_task(void *data)
 				__cpufreq_driver_target(pcpu->policy,
 							max_freq,
 							CPUFREQ_RELATION_H);
+			mutex_unlock(&set_speed_lock);
 			trace_cpufreq_zeneractive_setspeed(cpu,
 						     pcpu->target_freq,
 						     pcpu->policy->cur);
@@ -1003,6 +1014,8 @@ static int __init cpufreq_zeneractive_init(void)
 	}
 
 	spin_lock_init(&speedchange_cpumask_lock);
+	mutex_init(&set_speed_lock);
+
 	speedchange_task =
 		kthread_create(cpufreq_zeneractive_speedchange_task, NULL,
 			       "cfzeneractive");

@@ -14,6 +14,7 @@
  *
  * Author: Mike Chan (mike@android.com)
  * Author: Brandon Berhent (bbedward@gmail.com)
+ *
  */
 
 #include <linux/cpu.h>
@@ -21,6 +22,7 @@
 #include <linux/cpufreq.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/tick.h>
 #include <linux/time.h>
@@ -28,8 +30,11 @@
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
 #include <linux/mutex.h>
-
+#include <linux/slab.h>
 #include <asm/cputime.h>
+
+#define CREATE_TRACE_POINTS
+#include <trace/events/cpufreq_zeneractive.h>
 
 static atomic_t active_count = ATOMIC_INIT(0);
 
@@ -54,7 +59,10 @@ struct cpufreq_zeneractive_cpuinfo {
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
+	unsigned int floor_freq;
 	unsigned int cur_load;
+	u64 floor_validate_time;
+	u64 hispeed_validate_time;
 	int governor_enabled;
 };
 
@@ -111,14 +119,26 @@ static unsigned long min_sample_time;
 /*
  * The sample rate of the timer used to increase frequency
  */
-#define DEFAULT_TIMER_RATE 20 * USEC_PER_MSEC
+#define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
 static unsigned long timer_rate;
+
+/*
+ * Wait this long before raising speed above hispeed, by default a single
+ * timer interval.
+ */
+#define DEFAULT_ABOVE_HISPEED_DELAY DEFAULT_TIMER_RATE
+static unsigned long above_hispeed_delay_val;
+
+/*
+ * Non-zero means longer-term speed boost active.
+ */
+
+static int boost_val;
 
 static bool governidle;
 module_param(governidle, bool, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(governidle,
 	"Set to 1 to wake up CPUs from idle to reduce speed (default 0)");
-
 
 static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 		unsigned int event);
@@ -194,16 +214,22 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	if (load_since_change > cpu_load)
 		cpu_load = load_since_change;
 
-	if (cpu_load >= go_hispeed_load) {
-		if (pcpu->target_freq < hispeed_freq &&
-		  hispeed_freq < pcpu->policy->max) {
-			new_freq = hispeed_freq;
-		} else {
-			new_freq = pcpu->policy->cur * cpu_load / target_load;
-		}
-	} else {
+	if ((cpu_load >= go_hispeed_load || boost_val) &&
+	    pcpu->target_freq < hispeed_freq)
+		new_freq = hispeed_freq;
+	else
 		new_freq = pcpu->policy->cur * cpu_load / target_load;
+
+	if (pcpu->target_freq >= hispeed_freq &&
+	    new_freq > pcpu->target_freq &&
+	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
+		trace_cpufreq_zeneractive_notyet(
+			data, cpu_load, pcpu->target_freq,
+			pcpu->policy->cur, new_freq);
+		goto rearm;
 	}
+
+	pcpu->hispeed_validate_time = now;
 
 	if (cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
 					   new_freq, CPUFREQ_RELATION_L,
@@ -216,20 +242,32 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	new_freq = pcpu->freq_table[index].frequency;
 
 	/*
-	 * Do not scale down or unless we have been at this frequency
-	 * for the minimum sample time.
+	 * Do not scale below floor_freq unless we have been at or above the
+	 * floor frequency for the minimum sample time since last validated.
 	 */
-	if (new_freq < pcpu->target_freq) {
-		if (now - pcpu->target_set_time < min_sample_time)
+	if (new_freq < pcpu->floor_freq) {
+		if (now - pcpu->floor_validate_time < min_sample_time) {
+			trace_cpufreq_zeneractive_notyet(
+				data, cpu_load, pcpu->target_freq,
+				pcpu->policy->cur, new_freq);
 			goto rearm;
+		}
 	}
 
-        if (pcpu->target_freq == new_freq) {
+	pcpu->floor_freq = new_freq;
+	pcpu->floor_validate_time = now;
+
+	if (pcpu->target_freq == new_freq) {
+		trace_cpufreq_zeneractive_already(
+			data, cpu_load, pcpu->target_freq,
+			pcpu->policy->cur, new_freq);
 		goto rearm_if_notmax;
 	}
 
-        pcpu->target_set_time_in_idle = now_idle;
-        pcpu->target_set_time = now;
+	trace_cpufreq_zeneractive_target(data, cpu_load, pcpu->target_freq,
+					 pcpu->policy->cur, new_freq);
+	pcpu->target_set_time_in_idle = now_idle;
+	pcpu->target_set_time = now;
 
 	pcpu->target_freq = new_freq;
 	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
@@ -302,6 +340,7 @@ static void cpufreq_zeneractive_idle_start(void)
 		 */
 		if (pending && pcpu->timer_idlecancel) {
 			del_timer(&pcpu->cpu_timer);
+			pcpu->timer_idlecancel = 0;
 		}
 	}
 
@@ -320,7 +359,7 @@ static void cpufreq_zeneractive_idle_end(void)
 		pcpu->timer_idlecancel = 0;
 		cpufreq_zeneractive_timer_resched(pcpu);
 	} else if (!governidle &&
-		  time_after_eq(jiffies, pcpu->cpu_timer.expires)) {
+		   time_after_eq(jiffies, pcpu->cpu_timer.expires)) {
 		del_timer(&pcpu->cpu_timer);
 		cpufreq_zeneractive_timer(smp_processor_id());
 	}
@@ -413,9 +452,9 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 
 static int cpufreq_zeneractive_speedchange_task(void *data)
 {
+	unsigned int cpu;
 	cpumask_t tmp_mask;
 	unsigned long flags;
-	unsigned int cpu;
 	struct cpufreq_zeneractive_cpuinfo *pcpu;
 
 	while (1) {
@@ -460,10 +499,49 @@ static int cpufreq_zeneractive_speedchange_task(void *data)
 				__cpufreq_driver_target(pcpu->policy,
 							max_freq,
 							CPUFREQ_RELATION_H);
+			trace_cpufreq_zeneractive_setspeed(cpu,
+						     pcpu->target_freq,
+						     pcpu->policy->cur);
 		}
 	}
 
 	return 0;
+}
+
+static void cpufreq_zeneractive_boost(void)
+{
+	int i;
+	int anyboost = 0;
+	unsigned long flags;
+	struct cpufreq_zeneractive_cpuinfo *pcpu;
+
+	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
+
+	for_each_online_cpu(i) {
+		pcpu = &per_cpu(cpuinfo, i);
+
+		if (pcpu->target_freq < hispeed_freq) {
+			pcpu->target_freq = hispeed_freq;
+			cpumask_set_cpu(i, &speedchange_cpumask);
+			pcpu->target_set_time_in_idle =
+				get_cpu_idle_time_us(i, &pcpu->target_set_time);
+			pcpu->hispeed_validate_time = pcpu->target_set_time;
+			anyboost = 1;
+		}
+
+		/*
+		 * Set floor freq and (re)start timer for when last
+		 * validated.
+		 */
+
+		pcpu->floor_freq = hispeed_freq;
+		pcpu->floor_validate_time = ktime_to_us(ktime_get());
+	}
+
+	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
+
+	if (anyboost)
+		wake_up_process(speedchange_task);
 }
 
 static ssize_t show_target_load(
@@ -668,6 +746,28 @@ static ssize_t store_min_sample_time(struct kobject *kobj,
 static struct global_attr min_sample_time_attr = __ATTR(min_sample_time, 0644,
 		show_min_sample_time, store_min_sample_time);
 
+static ssize_t show_above_hispeed_delay(struct kobject *kobj,
+					struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", above_hispeed_delay_val);
+}
+
+static ssize_t store_above_hispeed_delay(struct kobject *kobj,
+					 struct attribute *attr,
+					 const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = strict_strtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	above_hispeed_delay_val = val;
+	return count;
+}
+
+define_one_global_rw(above_hispeed_delay);
+
 static ssize_t show_timer_rate(struct kobject *kobj,
 			struct attribute *attr, char *buf)
 {
@@ -690,10 +790,59 @@ static ssize_t store_timer_rate(struct kobject *kobj,
 static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 		show_timer_rate, store_timer_rate);
 
+static ssize_t show_boost(struct kobject *kobj, struct attribute *attr,
+			  char *buf)
+{
+	return sprintf(buf, "%d\n", boost_val);
+}
+
+static ssize_t store_boost(struct kobject *kobj, struct attribute *attr,
+			   const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	boost_val = val;
+
+	if (boost_val) {
+		trace_cpufreq_zeneractive_boost("on");
+		cpufreq_zeneractive_boost();
+	} else {
+		trace_cpufreq_zeneractive_unboost("off");
+	}
+
+	return count;
+}
+
+define_one_global_rw(boost);
+
+static ssize_t store_boostpulse(struct kobject *kobj, struct attribute *attr,
+				const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = kstrtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	trace_cpufreq_zeneractive_boost("pulse");
+	cpufreq_zeneractive_boost();
+	return count;
+}
+
+static struct global_attr boostpulse =
+	__ATTR(boostpulse, 0200, NULL, store_boostpulse);
+
 static struct attribute *zeneractive_attributes[] = {
 	&target_load_attr.attr,
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
+	&above_hispeed_delay.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
@@ -701,6 +850,8 @@ static struct attribute *zeneractive_attributes[] = {
 	&insert_delay_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
+	&boost.attr,
+	&boostpulse.attr,
 	NULL,
 };
 
@@ -710,16 +861,16 @@ static struct attribute_group zeneractive_attr_group = {
 };
 
 static int cpufreq_zeneractive_idle_notifier(struct notifier_block *nb,
-                                             unsigned long val,
-                                             void *data)
+					     unsigned long val,
+					     void *data)
 {
 	switch (val) {
-		case IDLE_START:
-			cpufreq_zeneractive_idle_start();
-			break;
-		case IDLE_END:
-			cpufreq_zeneractive_idle_end();
-			break;
+	case IDLE_START:
+		cpufreq_zeneractive_idle_start();
+		break;
+	case IDLE_END:
+		cpufreq_zeneractive_idle_end();
+		break;
 	}
 
 	return 0;
@@ -755,6 +906,11 @@ static int cpufreq_governor_zeneractive(struct cpufreq_policy *policy,
 			pcpu->target_set_time_in_idle =
 				get_cpu_idle_time_us(j,
 					     &pcpu->target_set_time);
+			pcpu->floor_freq = pcpu->target_freq;
+			pcpu->floor_validate_time =
+				pcpu->target_set_time;
+			pcpu->hispeed_validate_time =
+				pcpu->target_set_time;
 			pcpu->governor_enabled = 1;
 			pcpu->total_below_unplug_time[0] = 0;
 			pcpu->total_below_unplug_time[1] = 0;
@@ -826,6 +982,7 @@ static int __init cpufreq_zeneractive_init(void)
 	unplug_delay = DEFAULT_UNPLUG_DELAY;
 	insert_delay = DEFAULT_INSERT_DELAY;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
+	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 	timer_rate = DEFAULT_TIMER_RATE;
 
 	/* Initalize per-cpu timers */
@@ -842,7 +999,7 @@ static int __init cpufreq_zeneractive_init(void)
 	spin_lock_init(&speedchange_cpumask_lock);
 	speedchange_task =
 		kthread_create(cpufreq_zeneractive_speedchange_task, NULL,
-				"cfzeneractive");
+			       "cfzeneractive");
 	if (IS_ERR(speedchange_task))
 		return PTR_ERR(speedchange_task);
 

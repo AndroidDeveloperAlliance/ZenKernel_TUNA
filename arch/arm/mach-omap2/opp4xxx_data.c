@@ -277,7 +277,7 @@ static struct omap_opp_def __initdata omap446x_opp_def_list[] = {
 	OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", true, 1036800000, OMAP4460_VDD_MPU_OPPTURBO_UV),
 	/* MPU OPP4 - OPP-Nitro */
 	OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1132800000, OMAP4460_VDD_MPU_OPPNITRO_UV_11328),
-	OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1230000000, OMAP4460_VDD_MPU_OPPNITRO_UV_1230),
+	OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1228800000, OMAP4460_VDD_MPU_OPPNITRO_UV_1230),
         OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1305600000, OMAP4460_VDD_MPU_OPPNITRO_UV_13056),
         OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1420800000, OMAP4460_VDD_MPU_OPPNITRO_UV_14208),
         OPP_INITIALIZER("mpu", "virt_dpll_mpu_ck", "mpu", false, 1536000000, OMAP4460_VDD_MPU_OPPNITRO_UV_1536),
@@ -375,7 +375,7 @@ int __init omap4_opp_init(void)
 
 	if (!r) {
 		omap4_opp_enable("mpu", 1132800000);
-		omap4_opp_enable("mpu", 1230000000);
+		omap4_opp_enable("mpu", 1228800000);
 		omap4_opp_enable("mpu", 1305600000);
 		omap4_opp_enable("mpu", 1420800000);
 		omap4_opp_enable("mpu", 1536000000);

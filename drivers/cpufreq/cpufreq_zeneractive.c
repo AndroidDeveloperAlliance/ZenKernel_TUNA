@@ -20,9 +20,9 @@
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
 #include <linux/cpufreq.h>
-#include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/sched.h>
 #include <linux/tick.h>
 #include <linux/time.h>
@@ -73,9 +73,8 @@ static cpumask_t speedchange_cpumask;
 static spinlock_t speedchange_cpumask_lock;
 static struct mutex set_speed_lock;
 
-/* Workqueue handles hotplugging */
-static struct workqueue_struct *hotplug_wq;
-static struct work_struct hotplug_work;
+/* realtime thread handles hotplugging */
+static struct task_struct *hotplug_task;
 static cpumask_t hotplug_cpumask;
 static spinlock_t hotplug_cpumask_lock;
 
@@ -280,7 +279,7 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 	spin_lock_irqsave(&hotplug_cpumask_lock, flags);
 	cpumask_set_cpu(data, &hotplug_cpumask);
 	spin_unlock_irqrestore(&hotplug_cpumask_lock, flags);
-	queue_work(hotplug_wq, &hotplug_work);
+	wake_up_process(hotplug_task);
 
 rearm_if_notmax:
 	/*
@@ -365,80 +364,104 @@ static void cpufreq_zeneractive_idle_end(void)
 	}
 }
 
-static void cpufreq_zeneractive_hotplug_work(struct work_struct *work)
+static int cpufreq_zeneractive_hotplug_task(void *data)
 {
 	u64 now;
 	unsigned int cpu;
 	unsigned long flags;
 	struct cpufreq_zeneractive_cpuinfo *pcpu;
 
-	spin_lock_irqsave(&hotplug_cpumask_lock, flags);
-	cpumask_clear(&hotplug_cpumask);
-	spin_unlock_irqrestore(&hotplug_cpumask_lock, flags);
+	while (1) {
+		set_current_state(TASK_INTERRUPTIBLE);
+		spin_lock_irqsave(&hotplug_cpumask_lock, flags);
 
-	pcpu = &per_cpu(cpuinfo, smp_processor_id());
-	smp_rmb();
+		if (cpumask_empty(&hotplug_cpumask)) {
+			spin_unlock_irqrestore(&hotplug_cpumask_lock,
+					       flags);
+			schedule();
 
-	get_cpu_idle_time_us(smp_processor_id(), &now);
+			if (kthread_should_stop())
+				break;
 
-	/*
-	 * Calculate how long we've been above or below the unplug_load
-	 * per CPU, so we can see if it has exceeded the unplug or insert delay.
-	 */
-	for_each_cpu(cpu, cpu_possible_mask) {
-		if (cpu == 0 || cpu > 3
-		    || !pcpu->governor_enabled)
+			spin_lock_irqsave(&hotplug_cpumask_lock, flags);
+		}
+
+		set_current_state(TASK_RUNNING);
+		cpumask_clear(&hotplug_cpumask);
+		spin_unlock_irqrestore(&hotplug_cpumask_lock, flags);
+
+		pcpu = &per_cpu(cpuinfo, smp_processor_id());
+		smp_rmb();
+
+		if (!pcpu->governor_enabled)
 			continue;
 
-		if (pcpu->cur_load <= unplug_load[cpu - 1]) {
-			/* Below: reset above counter */
-			pcpu->total_above_unplug_time[cpu - 1] = 0;
-			pcpu->last_time_above_unplug_time[cpu - 1] = 0;
-			if (!pcpu->last_time_below_unplug_time[cpu - 1])
-				pcpu->last_time_below_unplug_time[cpu - 1] = now;
-			pcpu->total_below_unplug_time[cpu - 1] +=
-				now - pcpu->last_time_below_unplug_time[cpu - 1];
+		get_cpu_idle_time_us(smp_processor_id(), &now);
+
+		/*
+		 * Calculate how long we've been above or below the unplug_load
+		 * per CPU, so we can see if it has exceeded the unplug or insert delay.
+		 */
+		for_each_cpu(cpu, cpu_possible_mask) {
+			if (cpu == 0 || cpu > 3) continue;
+			if (pcpu->cur_load <= unplug_load[cpu - 1]) {
+				/* Below: reset above counter */
+				pcpu->total_above_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_above_unplug_time[cpu - 1] = 0;
+				if (!pcpu->last_time_below_unplug_time[cpu - 1])
+					pcpu->last_time_below_unplug_time[cpu - 1] = now;
+				pcpu->total_below_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_below_unplug_time[cpu - 1];
+			}
+			if (pcpu->cur_load > unplug_load[cpu - 1]) {
+				pcpu->total_below_unplug_time[cpu - 1] = 0;
+				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
+				if (!pcpu->last_time_above_unplug_time[cpu - 1])
+					pcpu->last_time_above_unplug_time[cpu - 1] = now;
+				pcpu->total_above_unplug_time[cpu - 1] +=
+					now - pcpu->last_time_above_unplug_time[cpu - 1];
+			}
 		}
-		if (pcpu->cur_load > unplug_load[cpu - 1]) {
-			/* Above: reset below counter */
-			pcpu->total_below_unplug_time[cpu - 1] = 0;
-			pcpu->last_time_below_unplug_time[cpu - 1] = 0;
-			if (!pcpu->last_time_above_unplug_time[cpu - 1])
-				pcpu->last_time_above_unplug_time[cpu - 1] = now;
-			pcpu->total_above_unplug_time[cpu - 1] +=
-				now - pcpu->last_time_above_unplug_time[cpu - 1];
+
+		/*
+ 		 * If CPU load is at or below the unplug load for CPU {#}
+		 * remove it, otherwise add it.
+		 */
+
+		 /* Ensure it has been unplug_delay since our last attempt*/
+		for_each_online_cpu(cpu) {
+			if (cpu == 0 || cpu > 3)
+				continue;
+			//--Have we been below unplug load for unplug_delay?
+			if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay) {
+				mutex_lock(&set_speed_lock);
+				cpu_down(cpu);
+				mutex_unlock(&set_speed_lock);
+			}
+		}
+
+		for_each_cpu_not(cpu, cpu_online_mask) {
+			if (cpu == 0 || cpu > 3)
+				continue;
+			//--Have we been above unplug_load for insert delay?
+			if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay) {
+				mutex_lock(&set_speed_lock);
+				cpu_up(cpu);
+				mutex_unlock(&set_speed_lock);
+			}
 		}
 	}
 
-	/*
- 	 * If CPU load is at or below the unplug load for CPU {#}
-	 * remove it, otherwise add it.
-	 */
-
-	 /* Ensure it has been unplug_delay since our last attempt*/
-	for_each_online_cpu(cpu) {
-		if (cpu == 0 || cpu > 3
-		    || !pcpu->governor_enabled)
-			continue;
-		//--Have we been below unplug load for unplug_delay?
-		if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay) {
-			mutex_lock(&set_speed_lock);
-			cpu_down(cpu);
-			mutex_unlock(&set_speed_lock);
-		}
-	}
-
+	/* Bring up all CPUs */
 	for_each_cpu_not(cpu, cpu_online_mask) {
-		if (cpu == 0 || cpu > 3
-		    || !pcpu->governor_enabled)
+		if (cpu == 0)
 			continue;
-		//--Have we been above unplug_load for insert delay?
-		if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay) {
-			mutex_lock(&set_speed_lock);
-			cpu_up(cpu);
-			mutex_unlock(&set_speed_lock);
-		}
+		mutex_lock(&set_speed_lock);
+		cpu_up(cpu);
+		mutex_unlock(&set_speed_lock);
 	}
+
+	return 0;
 }
 
 static int cpufreq_zeneractive_speedchange_task(void *data)
@@ -991,7 +1014,6 @@ static int __init cpufreq_zeneractive_init(void)
 	}
 
 	spin_lock_init(&speedchange_cpumask_lock);
-	spin_lock_init(&hotplug_cpumask_lock);
 	mutex_init(&set_speed_lock);
 
 	speedchange_task =
@@ -1006,12 +1028,18 @@ static int __init cpufreq_zeneractive_init(void)
 	/* NB: wake up so the thread does not look hung to the freezer */
 	wake_up_process(speedchange_task);
 
-	hotplug_wq = alloc_workqueue("hpzeneractive", 0, 1);
-	if (!hotplug_wq) {
-		put_task_struct(speedchange_task);
-		return -ENOMEM;
-	}
-	INIT_WORK(&hotplug_work, cpufreq_zeneractive_hotplug_work);
+	spin_lock_init(&hotplug_cpumask_lock);
+	hotplug_task =
+		kthread_create(cpufreq_zeneractive_hotplug_task, NULL,
+				"hpzeneractive");
+	if (IS_ERR(hotplug_task))
+		return PTR_ERR(hotplug_task);
+
+	sched_setscheduler_nocheck(hotplug_task, SCHED_FIFO, &param);
+	get_task_struct(hotplug_task);
+
+	/* NB: wake up so the thread does not look hung to the freezer */
+	wake_up_process(hotplug_task);
 
 	return cpufreq_register_governor(&cpufreq_gov_zeneractive);
 }
@@ -1025,9 +1053,11 @@ module_init(cpufreq_zeneractive_init);
 static void __exit cpufreq_zeneractive_exit(void)
 {
 	cpufreq_unregister_governor(&cpufreq_gov_zeneractive);
+	/* Stop the threads */
 	kthread_stop(speedchange_task);
 	put_task_struct(speedchange_task);
-	destroy_workqueue(hotplug_wq);
+	kthread_stop(hotplug_task);
+	put_task_struct(hotplug_task);
 }
 
 module_exit(cpufreq_zeneractive_exit);

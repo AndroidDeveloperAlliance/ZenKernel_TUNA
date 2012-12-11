@@ -84,6 +84,10 @@ static unsigned long go_hispeed_load;
 
 static unsigned int unplug_load[3];
 
+/* Target load.  Lower values result in higher CPU speeds. */
+#define DEFAULT_TARGET_LOAD 90
+static unsigned long target_load = DEFAULT_TARGET_LOAD;
+
 /*
  * The minimum amount of time we should be <= unplug_load
  * before removing CPUs. Default is 5s.
@@ -195,14 +199,14 @@ static void cpufreq_zeneractive_timer(unsigned long data)
 		  hispeed_freq < pcpu->policy->max) {
 			new_freq = hispeed_freq;
 		} else {
-                        new_freq = pcpu->policy->max * cpu_load / 100;
+			new_freq = pcpu->policy->cur * cpu_load / target_load;
 		}
 	} else {
-		new_freq = hispeed_freq * cpu_load / 100;
+		new_freq = pcpu->policy->cur * cpu_load / target_load;
 	}
 
 	if (cpufreq_frequency_table_target(pcpu->policy, pcpu->freq_table,
-					   new_freq, CPUFREQ_RELATION_H,
+					   new_freq, CPUFREQ_RELATION_L,
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
@@ -462,6 +466,30 @@ static int cpufreq_zeneractive_speedchange_task(void *data)
 	return 0;
 }
 
+static ssize_t show_target_load(
+	struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", target_load);
+}
+
+static ssize_t store_target_load(
+	struct kobject *kobj, struct attribute *attr, const char *buf,
+	size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = strict_strtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	target_load = val;
+	return count;
+}
+
+static struct global_attr target_load_attr =
+	__ATTR(target_load, S_IRUGO | S_IWUSR,
+		show_target_load, store_target_load);
+
 static ssize_t show_hispeed_freq(struct kobject *kobj,
 				 struct attribute *attr, char *buf)
 {
@@ -663,6 +691,7 @@ static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 		show_timer_rate, store_timer_rate);
 
 static struct attribute *zeneractive_attributes[] = {
+	&target_load_attr.attr,
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
 	&unplug_load_cpu1_attr.attr,

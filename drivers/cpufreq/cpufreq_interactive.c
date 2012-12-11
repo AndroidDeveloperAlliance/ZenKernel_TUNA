@@ -68,7 +68,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Target load.  Lower values result in higher CPU speeds. */
-#define DEFAULT_TARGET_LOAD 90
+#define DEFAULT_TARGET_LOAD 100
 static unsigned long target_load = DEFAULT_TARGET_LOAD;
 
 /*

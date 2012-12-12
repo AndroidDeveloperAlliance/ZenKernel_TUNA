@@ -10,19 +10,6 @@ if [ -z `/tmp/busybox grep init.d init.rc` ]; then
 	echo '    class main' >> init.rc
 	echo '    oneshot' >> init.rc
 fi
-# Ensure min/max frequency scaling perms are properly set in the ramdisk
-if [ -z `/tmp/busybox grep 'chown root system /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq' init.rc` ]; then
-	/tmp/busybox sed -i '/chown root radio \/proc\/cmdline/ a\    chown root system \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_max_freq' init.rc
-fi
-if [ -z `/tmp/busybox grep 'chmod 0664 /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq' init.rc` ]; then
-	/tmp/busybox sed -i '/chown root system \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_max_freq/ a\    chmod 0664 \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_max_freq' init.rc
-fi
-if [ -z `/tmp/busybox grep 'chown root system /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq' init.rc` ]; then
-	/tmp/busybox sed -i '/chmod 0664 \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_max_freq/ a\    chown root system \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_min_freq' init.rc
-fi
-if [ -z `/tmp/busybox grep 'chmod 0664 /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq' init.rc` ]; then
-	/tmp/busybox sed -i '/chown root system \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_min_freq/ a\    chmod 0664 \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_min_freq' init.rc
-fi
 # Cleanup existing init.rc of things we don't want it to set
 /tmp/busybox sed -i '/write \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_max_freq/d' init.rc
 /tmp/busybox sed -i '/write \/sys\/devices\/system\/cpu\/cpu0\/cpufreq\/scaling_min_freq/d' init.rc

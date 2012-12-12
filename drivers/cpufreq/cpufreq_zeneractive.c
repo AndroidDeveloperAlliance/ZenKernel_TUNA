@@ -86,7 +86,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 35
+#define DEFAULT_UNPLUG_LOAD_CPU1 30
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
@@ -107,7 +107,7 @@ static unsigned long unplug_delay;
  * The minimum amount of time we should be > unplug_load
  * before inserting CPUs.
  */
-#define DEFAULT_INSERT_DELAY (100 * USEC_PER_MSEC)
+#define DEFAULT_INSERT_DELAY (80 * USEC_PER_MSEC)
 static unsigned long insert_delay;
 
 /*

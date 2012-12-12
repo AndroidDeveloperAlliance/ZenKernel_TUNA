@@ -86,7 +86,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 30
+#define DEFAULT_UNPLUG_LOAD_CPU1 25
 #define DEFAULT_UNPLUG_LOAD_CPU2 60
 #define DEFAULT_UNPLUG_LOAD_CPU3 75
 
@@ -393,8 +393,9 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		pcpu = &per_cpu(cpuinfo, smp_processor_id());
 		smp_rmb();
 
-		if (!pcpu->governor_enabled)
+		if (!pcpu->governor_enabled) {
 			continue;
+		}
 
 		get_cpu_idle_time_us(smp_processor_id(), &now);
 
@@ -414,6 +415,7 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 					now - pcpu->last_time_below_unplug_time[cpu - 1];
 			}
 			if (pcpu->cur_load > unplug_load[cpu - 1]) {
+				/* Above: reset below counter */
 				pcpu->total_below_unplug_time[cpu - 1] = 0;
 				pcpu->last_time_below_unplug_time[cpu - 1] = 0;
 				if (!pcpu->last_time_above_unplug_time[cpu - 1])
@@ -432,7 +434,7 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		for_each_online_cpu(cpu) {
 			if (cpu == 0 || cpu > 3)
 				continue;
-			//--Have we been below unplug load for unplug_delay?
+			/* Have we been below unplug load for unplug_delay? */
 			if (pcpu->total_below_unplug_time[cpu - 1] > unplug_delay) {
 				mutex_lock(&set_speed_lock);
 				cpu_down(cpu);
@@ -443,22 +445,13 @@ static int cpufreq_zeneractive_hotplug_task(void *data)
 		for_each_cpu_not(cpu, cpu_online_mask) {
 			if (cpu == 0 || cpu > 3)
 				continue;
-			//--Have we been above unplug_load for insert delay?
+			/* Have we been above unplug_load for insert delay? */
 			if (pcpu->total_above_unplug_time[cpu - 1] > insert_delay) {
 				mutex_lock(&set_speed_lock);
 				cpu_up(cpu);
 				mutex_unlock(&set_speed_lock);
 			}
 		}
-	}
-
-	/* Bring up all CPUs */
-	for_each_cpu_not(cpu, cpu_online_mask) {
-		if (cpu == 0)
-			continue;
-		mutex_lock(&set_speed_lock);
-		cpu_up(cpu);
-		mutex_unlock(&set_speed_lock);
 	}
 
 	return 0;

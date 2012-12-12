@@ -339,7 +339,11 @@ static bool sd1idle;
 static bool retrydata;
 #define RETRYCHAN(chan) (((chan) == SDPCM_EVENT_CHANNEL) || retrydata)
 
+#if defined(SDIO_CRC_ERROR_FIX)
+static uint watermark = 48;
+#else
 static const uint watermark = 8;
+#endif
 static const uint firstread = DHD_FIRSTREAD;
 
 #define HDATLEN (firstread - (SDPCM_HDRLEN))
@@ -1546,6 +1550,9 @@ enum {
 	IOV_SDALIGN,
 	IOV_DEVRESET,
 	IOV_CPU,
+#if defined(SDIO_CRC_ERROR_FIX)
+	IOV_WATERMARK,
+#endif /* SDIO_CRC_ERROR_FIX */
 #ifdef SDTEST
 	IOV_PKTGEN,
 	IOV_EXTLOOP,
@@ -1601,6 +1608,9 @@ const bcm_iovar_t dhdsdio_iovars[] = {
 	{"extloop",	IOV_EXTLOOP,	0,	IOVT_BOOL,	0 },
 	{"pktgen",	IOV_PKTGEN,	0,	IOVT_BUFFER,	sizeof(dhd_pktgen_t) },
 #endif /* SDTEST */
+#if defined(SDIO_CRC_ERROR_FIX)
+	{"watermark",   IOV_WATERMARK,  0,      IOVT_UINT32,    0 },
+#endif
 	{"dngl_isolation", IOV_DONGLEISOLATION,	0,	IOVT_UINT32,	0 },
 #ifdef SOFTAP
 	{"fwpath", IOV_FWPATH, 0, IOVT_BUFFER, 0 },
@@ -2615,6 +2625,20 @@ dhdsdio_doiovar(dhd_bus_t *bus, const bcm_iovar_t *vi, uint32 actionid, const ch
 		break;
 #endif /* SDTEST */
 
+#if defined(SDIO_CRC_ERROR_FIX)
+	case IOV_GVAL(IOV_WATERMARK):
+		int_val = (int32)watermark;
+		bcopy(&int_val, arg, val_size);
+		break;
+
+	case IOV_SVAL(IOV_WATERMARK):
+		watermark = (uint)int_val;
+		watermark = (watermark > SBSDIO_WATERMARK_MASK) ? SBSDIO_WATERMARK_MASK : watermark;
+		DHD_ERROR(("Setting watermark as 0x%x.\n", watermark));
+		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_WATERMARK, (uint8)watermark, NULL);
+		break;
+
+#endif /* SDIO_CRC_ERROR_FIX */
 
 	case IOV_GVAL(IOV_DONGLEISOLATION):
 		int_val = bus->dhd->dongle_isolation;
@@ -3022,39 +3046,45 @@ dhd_bus_stop(struct dhd_bus *bus, bool enforce_mutex)
 	if (enforce_mutex)
 		dhd_os_sdlock(bus->dhd);
 
-	BUS_WAKE(bus);
+	if ((bus->dhd->busstate == DHD_BUS_DOWN) || bus->dhd->hang_was_sent) {
+		bus->dhd->busstate = DHD_BUS_DOWN;
+		bus->hostintmask = 0;
+		bcmsdh_intr_disable(bus->sdh);
+	} else {
+		BUS_WAKE(bus);
 
-	/* Change our idea of bus state */
-	bus->dhd->busstate = DHD_BUS_DOWN;
+		/* Change our idea of bus state */
+		bus->dhd->busstate = DHD_BUS_DOWN;
 
-	/* Enable clock for device interrupts */
-	dhdsdio_clkctl(bus, CLK_AVAIL, FALSE);
+		/* Enable clock for device interrupts */
+		dhdsdio_clkctl(bus, CLK_AVAIL, FALSE);
 
-	/* Disable and clear interrupts at the chip level also */
-	W_SDREG(0, &bus->regs->hostintmask, retries);
-	local_hostintmask = bus->hostintmask;
-	bus->hostintmask = 0;
+		/* Disable and clear interrupts at the chip level also */
+		W_SDREG(0, &bus->regs->hostintmask, retries);
+		local_hostintmask = bus->hostintmask;
+		bus->hostintmask = 0;
 
-	/* Force clocks on backplane to be sure F2 interrupt propagates */
-	saveclk = bcmsdh_cfg_read(bus->sdh, SDIO_FUNC_1, SBSDIO_FUNC1_CHIPCLKCSR, &err);
-	if (!err) {
-		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_FUNC1_CHIPCLKCSR,
-		                 (saveclk | SBSDIO_FORCE_HT), &err);
+		/* Force clocks on backplane to be sure F2 interrupt propagates */
+		saveclk = bcmsdh_cfg_read(bus->sdh, SDIO_FUNC_1, SBSDIO_FUNC1_CHIPCLKCSR, &err);
+		if (!err) {
+			bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_FUNC1_CHIPCLKCSR,
+			                 (saveclk | SBSDIO_FORCE_HT), &err);
+		}
+		if (err) {
+			DHD_ERROR(("%s: Failed to force clock for F2: err %d\n", __FUNCTION__, err));
+		}
+
+		/* Turn off the bus (F2), free any pending packets */
+		DHD_INTR(("%s: disable SDIO interrupts\n", __FUNCTION__));
+		bcmsdh_intr_disable(bus->sdh);
+		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_0, SDIOD_CCCR_IOEN, SDIO_FUNC_ENABLE_1, NULL);
+
+		/* Clear any pending interrupts now that F2 is disabled */
+		W_SDREG(local_hostintmask, &bus->regs->intstatus, retries);
+
+		/* Turn off the backplane clock (only) */
+		dhdsdio_clkctl(bus, CLK_SDONLY, FALSE);
 	}
-	if (err) {
-		DHD_ERROR(("%s: Failed to force clock for F2: err %d\n", __FUNCTION__, err));
-	}
-
-	/* Turn off the bus (F2), free any pending packets */
-	DHD_INTR(("%s: disable SDIO interrupts\n", __FUNCTION__));
-	bcmsdh_intr_disable(bus->sdh);
-	bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_0, SDIOD_CCCR_IOEN, SDIO_FUNC_ENABLE_1, NULL);
-
-	/* Clear any pending interrupts now that F2 is disabled */
-	W_SDREG(local_hostintmask, &bus->regs->intstatus, retries);
-
-	/* Turn off the backplane clock (only) */
-	dhdsdio_clkctl(bus, CLK_SDONLY, FALSE);
 
 	/* Clear the data packet queues */
 	pktq_flush(osh, &bus->txq, TRUE, NULL, 0);
@@ -3161,8 +3191,17 @@ dhd_bus_init(dhd_pub_t *dhdp, bool enforce_mutex)
 			bus->hostintmask |= I_XMTDATA_AVAIL;
 		}
 		W_SDREG(bus->hostintmask, &bus->regs->hostintmask, retries);
+#ifdef SDIO_CRC_ERROR_FIX
+		if (bus->blocksize < 512) {
+			watermark = bus->blocksize / 4;
+		}
+#endif /* SDIO_CRC_ERROR_FIX */
 
 		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_WATERMARK, (uint8)watermark, &err);
+#ifdef SDIO_CRC_ERROR_FIX
+		bcmsdh_cfg_write(bus->sdh, SDIO_FUNC_1, SBSDIO_DEVICE_CTL,
+			SBSDIO_DEVCTL_EN_F2_BLK_WATERMARK, NULL);
+#endif /* SDIO_CRC_ERROR_FIX */
 
 		/* Set bus state according to enable result */
 		dhdp->busstate = DHD_BUS_DATA;
@@ -4413,6 +4452,7 @@ dhdsdio_hostmail(dhd_bus_t *bus)
 	if (hmb_data & HMB_DATA_FWHALT) {
 		DHD_ERROR(("INTERNAL ERROR: FIRMWARE HALTED\n"));
 		dhdsdio_checkdied(bus, NULL, 0);
+		bus->dhd->busstate = DHD_BUS_DOWN;
 	}
 #endif /* DHD_DEBUG */
 

@@ -135,7 +135,7 @@ config CPU_FREQ_DEFAULT_GOV_INTERACTIVE
 
 config CPU_FREQ_DEFAULT_GOV_ZENX
 	bool "ZenX"
-	select CPU_FREQ_GOV_ZENERACTIVE
+	select CPU_FREQ_GOV_ZENX
 	help
 	  Use the CPUFreq governor 'ZenX' as default.
 
@@ -248,8 +248,8 @@ config CPU_FREQ_GOV_INTERACTIVE
 
 	  If in doubt, say N.
 
-config CPU_FREQ_GOV_ZENERACTIVE
-	tristate "'zeneractive' cpufreq governor"
+config CPU_FREQ_GOV_ZENX
+	tristate "'ZenX' cpufreq governor"
 	depends on CPU_FREQ
 	help
 	  'ZenX' - an interactive-based governor

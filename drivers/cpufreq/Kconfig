@@ -133,12 +133,6 @@ config CPU_FREQ_DEFAULT_GOV_INTERACTIVE
 	  loading your cpufreq low-level hardware driver, using the
 	  'interactive' governor for latency-sensitive workloads.
 
-config CPU_FREQ_DEFAULT_GOV_ZENERACTIVE
-	bool "zeneractive"
-	select CPU_FREQ_GOV_ZENERACTIVE
-	help
-	  Use the CPUFreq governor 'zeneractive' as default.
-
 config CPU_FREQ_DEFAULT_GOV_INTELLIDEMAND
 	bool "intellidemand"
 	select CPU_FREQ_GOV_INTELLIDEMAND
@@ -247,22 +241,6 @@ config CPU_FREQ_GOV_INTERACTIVE
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
-
-config CPU_FREQ_GOV_ZENERACTIVE
-	tristate "'zeneractive' cpufreq governor"
-	depends on CPU_FREQ
-	help
-	  'zeneractive' - an interactive-based governor
-
-	  This governor provides full CPU hotplugging support
-	  based on CPU load per CPU.
-
-	  It also provides CPU hotplugging of CPU 1-X on
-	  suspend/wake.
-
-	  For details, take a look at linux/Documentation/cpu-freq.
-
-	  If in doubt, say N
 
 config CPU_FREQ_GOV_INTELLIDEMAND
 	tristate "'intellidemand' cpufreq governor"

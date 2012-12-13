@@ -29,7 +29,6 @@ Contents:
 2.4  Ondemand
 2.5  Conservative
 2.6  Interactive
-2.8  Zeneractive
 
 3.   The Governor Interface in the CPUfreq Core
 
@@ -279,69 +278,6 @@ entropy and leads to lots of spurious plug-in and plug-out transitions.
 The number of sampling periods averaged together is tunable via the
 "hotplug_in_sampling_periods" and "hotplug_out_sampling_periods"
 run-time tunable parameters.
-
-2.8 Zeneractive
----------------
-
-The CPUfreq governor "zeneractive" behaves exactly the same as
-"interactive" when scaling frequencies.
-
-Zeneractive also hotplugs CPUs based on the average CPU load
-across all CPUs. For example, if unplug_load_cpu1 is set to 15
-and average CPU load is determined to be 10%. The governor
-will choose to disable CPU1.
-
-The governor will not unplug a CPU unless the CPU load
-has been less than/equal to unplug_load[CPU] for unplug_delay.
-
-The governor will not insert a CPU unless the CPU load
-has been greater than unplug_load[CPU] for insert_delay.
-
-Zeneractive also will suspend all but CPU 0 on early suspend
-and wake up all CPUs on wakeup.
-
-Hotplugging while awake can be disabled per-CPU by setting 
-unplug_load_cpu[#] to 0.
-
-The tuneable values for this governor are:
-
-min_sample_time: The minimum amount of time to spend at the current
-frequency before ramping down. This is to ensure that the governor has
-seen enough historic cpu load data to determine the appropriate
-workload.  Default is 80000 uS.
-
-hispeed_freq: An intermediate "hi speed" at which to initially ramp
-when CPU load hits the value specified in go_hispeed_load.  If load
-stays high for the amount of time specified in above_hispeed_delay,
-then speed may be bumped higher.  Default is maximum speed.
-
-go_hispeed_load: The CPU load at which to ramp to the intermediate "hi
-speed".  Default is 85%.
-
-above_hispeed_delay: Once speed is set to hispeed_freq, wait for this
-long before bumping speed higher in response to continued high load.
-Default is 20000 uS.
-
-timer_rate: Sample rate for reevaluating cpu load when the system is
-not idle.  Default is 20000 uS.
-
-suspend_frequency: The target frequency we should apply when going into
-suspend.
-
-unplug_delay: How long CPU load should be below/equal to unplug_load[cpu] 
-before removing a CPU. Default is 5000000 uS. 
-
-insert_delay: How long CPU load should be above unplug_load[cpu]
-before removing a CPU. Default is 80000 uS.
-
-unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
-Default is 25%
-
-unplug_load_cpu2: CPU load that we should unplug CPU 2 at.
-default is 60%
-
-unplug_load_cpu3: CPU load that we should unplug CPU 3 at.
-default is 75%
 
 3. The Governor Interface in the CPUfreq Core
 =============================================

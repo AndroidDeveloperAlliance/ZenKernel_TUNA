@@ -29,7 +29,7 @@ Contents:
 2.4  Ondemand
 2.5  Conservative
 2.6  Interactive
-2.8  Zeneractive
+2.8  ZenX
 
 3.   The Governor Interface in the CPUfreq Core
 
@@ -280,13 +280,13 @@ The number of sampling periods averaged together is tunable via the
 "hotplug_in_sampling_periods" and "hotplug_out_sampling_periods"
 run-time tunable parameters.
 
-2.8 Zeneractive
+2.8 ZenX
 ---------------
 
-The CPUfreq governor "zeneractive" behaves exactly the same as
+The CPUfreq governor "ZenX" behaves exactly the same as
 "interactive" when scaling frequencies.
 
-Zeneractive also hotplugs CPUs based on the average CPU load
+ZenX also hotplugs CPUs based on the average CPU load
 across all CPUs. For example, if unplug_load_cpu1 is set to 15
 and average CPU load is determined to be 10%. The governor
 will choose to disable CPU1.
@@ -297,10 +297,9 @@ has been less than/equal to unplug_load[CPU] for unplug_delay.
 The governor will not insert a CPU unless the CPU load
 has been greater than unplug_load[CPU] for insert_delay.
 
-Zeneractive also will suspend all but CPU 0 on early suspend
-and wake up all CPUs on wakeup.
+ZenX also inserts all CPUs on early suspend resume.
 
-Hotplugging while awake can be disabled per-CPU by setting 
+Hotplugging can be disabled per-CPU by setting 
 unplug_load_cpu[#] to 0.
 
 The tuneable values for this governor are:

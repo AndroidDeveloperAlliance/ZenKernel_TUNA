@@ -533,7 +533,7 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 				up_read(&pcpu->mutex);
 				continue;
 			}
-			
+
 			/*
 			 * Compute average CPU load
 			 * Use cpu_online_mask to get the load across
@@ -542,11 +542,11 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 			for_each_cpu(j, cpu_online_mask) {
 				struct cpufreq_zenx_cpuinfo *pjcpu =
 					&per_cpu(cpuinfo, j);
-				
+
 				total_load += pjcpu->cur_load;
 			}
 			avg_load = total_load / num_online_cpus();
-	
+
 			/*
 			 * Determine which CPUs to remove/insert.
 			 * Use cpu_possible_mask so we get online
@@ -575,18 +575,24 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 					/* Below: reset above counter */
 					pjcpu->total_above_unplug_time = 0;
 					pjcpu->last_time_above_unplug_time = 0;
-					if (!pjcpu->last_time_below_unplug_time)
+					if (!pjcpu->last_time_below_unplug_time) {
 						pjcpu->last_time_below_unplug_time = now;
-					pjcpu->total_below_unplug_time +=
-						now - pjcpu->last_time_below_unplug_time;
+						pjcpu->total_below_unplug_time = 0;
+					} else {
+						pjcpu->total_below_unplug_time +=
+							now - pjcpu->last_time_below_unplug_time;
+					}
 				} else if (avg_load > unplug_load[j - 1]) {
 					/* Above: reset below counter */
 					pjcpu->total_below_unplug_time = 0;
 					pjcpu->last_time_below_unplug_time = 0;
-					if (!pjcpu->last_time_above_unplug_time)
+					if (!pjcpu->last_time_above_unplug_time) {
 						pjcpu->last_time_above_unplug_time = now;
-					pjcpu->total_above_unplug_time +=
-						now - pjcpu->last_time_above_unplug_time;
+						pjcpu->total_above_unplug_time = 0;
+					} else {
+						pjcpu->total_above_unplug_time +=
+							now - pjcpu->last_time_above_unplug_time;
+					}
 				}
 
 				/*
@@ -596,9 +602,10 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 				 * as we have no idea if it's online or offline.
 				 */
 				if (cpu_online(j) &&
-					pjcpu->total_below_unplug_time > unplug_delay) {
+				    pjcpu->total_below_unplug_time > unplug_delay) {
 					cpu_down(j);
-				} else if (pjcpu->total_above_unplug_time > insert_delay) {
+				} else if (!cpu_online(j) &&
+				    pjcpu->total_above_unplug_time > insert_delay) {
 					cpu_up(j);
 				}
 			}

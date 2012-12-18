@@ -43,6 +43,8 @@ struct cpufreq_zenx_cpuinfo {
 	int timer_idlecancel;
 	u64 time_in_idle;
 	u64 time_in_idle_timestamp;
+	u64 target_set_time;
+	u64 target_set_time_in_idle;
 	/*
 	 * Measurement for how long cur_load has been
 	 * above and below unplug_load[cpu].
@@ -362,6 +364,9 @@ static void cpufreq_zenx_timer(unsigned long data)
 	trace_cpufreq_zenx_target(data, cpu_load, pcpu->target_freq,
 					 pcpu->policy->cur, new_freq);
 
+	pcpu->target_set_time_in_idle = now_idle;
+	pcpu->target_set_time = now;
+
 	pcpu->target_freq = new_freq;
 	spin_lock_irqsave(&freqscale_hotplug_cpumask_lock, flags);
 	cpumask_set_cpu(data, &freqscale_hotplug_cpumask);
@@ -620,8 +625,9 @@ static void cpufreq_zenx_boost(void)
 		if (pcpu->target_freq < hispeed_freq) {
 			pcpu->target_freq = hispeed_freq;
 			cpumask_set_cpu(i, &freqscale_hotplug_cpumask);
-			pcpu->hispeed_validate_time =
-				ktime_to_us(ktime_get());
+			pcpu->target_set_time_in_idle =
+				get_cpu_idle_time_us(i, &pcpu->target_set_time);
+			pcpu->hispeed_validate_time = pcpu->target_set_time;
 			anyboost = 1;
 		}
 
@@ -1049,11 +1055,14 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->policy = policy;
 			pcpu->target_freq = policy->cur;
 			pcpu->freq_table = freq_table;
+			pcpu->target_set_time_in_idle =
+				get_cpu_idle_time_us(j,
+					&pcpu->target_set_time);
 			pcpu->floor_freq = pcpu->target_freq;
 			pcpu->floor_validate_time =
-				ktime_to_us(ktime_get());
+				pcpu->target_set_time;
 			pcpu->hispeed_validate_time =
-				pcpu->floor_validate_time;
+				pcpu->target_set_time;
 			pcpu->governor_enabled = 1;
 			pcpu->total_below_unplug_time = 0;
 			pcpu->total_above_unplug_time = 0;

@@ -44,8 +44,6 @@ struct cpufreq_zenx_cpuinfo {
 	int timer_idlecancel;
 	u64 time_in_idle;
 	u64 time_in_idle_timestamp;
-	u64 target_set_time;
-	u64 target_set_time_in_idle;
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
@@ -274,7 +272,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int delta_idle;
 	unsigned int delta_time;
 	unsigned int cpu, cpu_load, avg_load;
-	int load_since_change;
 	struct cpufreq_zenx_cpuinfo *pcpu =
 		&per_cpu(cpuinfo, data);
 	u64 now_idle;
@@ -310,16 +307,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	else
 		cpu_load = 100 * (delta_time - delta_idle) / delta_time;
 
-	delta_idle = (unsigned int)(now_idle - pcpu->target_set_time_in_idle);
-	delta_time = (unsigned int)(now - pcpu->target_set_time);
-
-	if ((delta_time == 0) || (delta_idle > delta_time))
-		load_since_change = 0;
-	else
-		load_since_change =
-			100 * (delta_time - delta_idle) / delta_time;
-
-	pcpu->last_cpu_load = load_since_change;
+	pcpu->last_cpu_load = cpu_load;
 
 	/* Skip hot-add/remove calculations for CPU 0 */
 	if (data > 0 && data < 4) {
@@ -411,9 +399,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 
 	trace_cpufreq_zenx_target(data, cpu_load, pcpu->target_freq,
 					 pcpu->policy->cur, new_freq);
-
-	pcpu->target_set_time_in_idle = now_idle;
-	pcpu->target_set_time = now;
 
 	pcpu->target_freq = new_freq;
 	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
@@ -676,9 +661,8 @@ static void cpufreq_zenx_boost(void)
 		if (pcpu->target_freq < hispeed_freq) {
 			pcpu->target_freq = hispeed_freq;
 			cpumask_set_cpu(i, &speedchange_cpumask);
-			pcpu->target_set_time_in_idle =
-				get_cpu_idle_time_us(i, &pcpu->target_set_time);
-			pcpu->hispeed_validate_time = pcpu->target_set_time;
+			pcpu->hispeed_validate_time =
+				ktime_to_us(ktime_get());
 			anyboost = 1;
 		}
 
@@ -1106,14 +1090,11 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->policy = policy;
 			pcpu->target_freq = policy->cur;
 			pcpu->freq_table = freq_table;
-			pcpu->target_set_time_in_idle =
-				get_cpu_idle_time_us(j,
-					&pcpu->target_set_time);
 			pcpu->floor_freq = pcpu->target_freq;
 			pcpu->floor_validate_time =
-				pcpu->target_set_time;
+				ktime_to_us(ktime_get());
 			pcpu->hispeed_validate_time =
-				pcpu->target_set_time;
+				pcpu->floor_validate_time;
 			pcpu->governor_enabled = 1;
 			pcpu->nr_periods_add = 0;
 			pcpu->nr_periods_remove = 0;

@@ -22,6 +22,7 @@
 #include <linux/cpufreq.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <linux/sched.h>
 #include <linux/tick.h>
@@ -45,22 +46,13 @@ struct cpufreq_zenx_cpuinfo {
 	u64 time_in_idle_timestamp;
 	u64 target_set_time;
 	u64 target_set_time_in_idle;
-	/*
-	 * Measurement for how long cur_load has been
-	 * above and below unplug_load[cpu].
-	 */
-	unsigned long total_below_unplug_time;
-	unsigned long total_above_unplug_time;
-	/*
-	 * Last time we were there checking unplug_time
-	 */
-	u64 last_time_below_unplug_time;
-	u64 last_time_above_unplug_time;
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
 	unsigned int floor_freq;
-	unsigned int cur_load;
+	unsigned int last_cpu_load;
+	unsigned int nr_periods_add;
+	unsigned int nr_periods_remove;
 	u64 floor_validate_time;
 	u64 hispeed_validate_time;
 	struct rw_semaphore mutex;
@@ -69,10 +61,21 @@ struct cpufreq_zenx_cpuinfo {
 
 static DEFINE_PER_CPU(struct cpufreq_zenx_cpuinfo, cpuinfo);
 
-/* realtime thread handles frequency scaling and hotplugging */
-static struct task_struct *freqscale_hotplug_task;
-static cpumask_t freqscale_hotplug_cpumask;
-static spinlock_t freqscale_hotplug_cpumask_lock;
+/* realtime thread handles frequency scaling */
+static struct task_struct *speedchange_task;
+static cpumask_t speedchange_cpumask;
+static spinlock_t speedchange_cpumask_lock;
+static struct mutex set_speed_lock;
+
+/* workqueues handle hotplugging */
+static struct workqueue_struct *hotplug_add_wq;
+static struct work_struct hotplug_add_work;
+static cpumask_t hotplug_add_cpumask;
+static spinlock_t hotplug_add_cpumask_lock;
+static struct workqueue_struct *hotplug_remove_wq;
+static struct work_struct hotplug_remove_work;
+static cpumask_t hotplug_remove_cpumask;
+static spinlock_t hotplug_remove_cpumask_lock;
 
 /* Hi speed to bump to from lo speed when load burst (default max) */
 static unsigned int hispeed_freq;
@@ -96,18 +99,18 @@ static unsigned int *target_loads = default_target_loads;
 static int ntarget_loads = ARRAY_SIZE(default_target_loads);
 
 /*
- * The minimum amount of time we should be <= unplug_load
- * before removing CPUs.
+ * How many sampling periods must pass before we hot-remove a CPU.
+ * CPU load must be below unplug_load for this many periods.
  */
-#define DEFAULT_UNPLUG_DELAY (5000 * USEC_PER_MSEC)
-static unsigned long unplug_delay;
+#define DEFAULT_NR_REMOVE_PERIODS (100)
+static unsigned int hot_remove_sampling_periods;
 
 /*
- * The minimum amount of time we should be > unplug_load
- * before inserting CPUs.
+ * How many sampling periods must pass before we hot-add a CPU.
+ * CPU load must be above unplug_load for this many periods.
  */
-#define DEFAULT_INSERT_DELAY (80 * USEC_PER_MSEC)
-static unsigned long insert_delay;
+#define DEFAULT_NR_ADD_PERIODS (25)
+static unsigned int hot_add_sampling_periods;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
@@ -191,7 +194,6 @@ static unsigned int choose_freq(
 	unsigned int prevfreq, freqmin, freqmax;
 	unsigned int tl;
 	int index;
-
 	freqmin = 0;
 	freqmax = UINT_MAX;
 
@@ -271,13 +273,17 @@ static void cpufreq_zenx_timer(unsigned long data)
 	u64 now;
 	unsigned int delta_idle;
 	unsigned int delta_time;
-	int cpu_load;
+	unsigned int cpu, cpu_load, avg_load;
 	int load_since_change;
 	struct cpufreq_zenx_cpuinfo *pcpu =
 		&per_cpu(cpuinfo, data);
 	u64 now_idle;
 	unsigned int new_freq;
 	unsigned int index;
+	unsigned int total_load = 0;
+	unsigned int rearm = 0;
+	unsigned int call_hp_add = 0;
+	unsigned int call_hp_remove = 0;
 	unsigned long flags;
 
 	if (!down_read_trylock(&pcpu->mutex))
@@ -287,14 +293,17 @@ static void cpufreq_zenx_timer(unsigned long data)
 		goto exit;
 
 	now_idle = get_cpu_idle_time_us(data, &now);
+
 	delta_idle = (unsigned int)(now_idle - pcpu->time_in_idle);
 	delta_time = (unsigned int)(now - pcpu->time_in_idle_timestamp);
 
 	/*
 	 * If timer ran less than 1ms after short-term sample started, retry.
 	 */
-	if (delta_time < 1000)
+	if (delta_time < 1000) {
+		rearm = 1;
 		goto rearm;
+	}
 
 	if (delta_idle > delta_time)
 		cpu_load = 0;
@@ -310,6 +319,43 @@ static void cpufreq_zenx_timer(unsigned long data)
 		load_since_change =
 			100 * (delta_time - delta_idle) / delta_time;
 
+	pcpu->last_cpu_load = load_since_change;
+
+	/* Skip hot-add/remove calculations for CPU 0 */
+	if (data > 0 && data < 4) {
+	        /*
+	         * Compute average load across all online CPUs
+        	 */
+        	for_each_cpu(cpu, cpu_online_mask) {
+			struct cpufreq_zenx_cpuinfo *pjcpu =
+				&per_cpu(cpuinfo, cpu);
+
+			total_load += pjcpu->last_cpu_load;
+		}
+		avg_load = total_load / num_online_cpus();
+
+		/*
+		 * Reset/Increment nr_periods we've been
+		 * here based on load.
+		 */
+		if (avg_load <= unplug_load[data - 1]) {
+			pcpu->nr_periods_add = 0;
+			pcpu->nr_periods_remove++;
+		} else if (avg_load > unplug_load[data - 1]) {
+			pcpu->nr_periods_remove = 0;
+			pcpu->nr_periods_add++;
+		}
+
+		if (pcpu->nr_periods_add > hot_add_sampling_periods)
+			call_hp_add = 1;
+		else if (pcpu->nr_periods_remove > hot_remove_sampling_periods)
+			call_hp_remove = 1;
+
+		/* Don't bother with frequency if this CPU is offline */
+		if (cpu_is_offline(data))
+			goto call_hp_work;
+	}
+
 	if ((cpu_load >= go_hispeed_load || boost_val) &&
 	    pcpu->target_freq < hispeed_freq)
 		new_freq = hispeed_freq;
@@ -322,7 +368,8 @@ static void cpufreq_zenx_timer(unsigned long data)
 		trace_cpufreq_zenx_notyet(
 			data, cpu_load, pcpu->target_freq,
 			pcpu->policy->cur, new_freq);
-		goto rearm;
+		rearm = 1;
+		goto call_hp_work;
 	}
 
 	pcpu->hispeed_validate_time = now;
@@ -332,7 +379,8 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
-		goto rearm;
+		rearm = 1;
+		goto call_hp_work;
 	}
 
 	new_freq = pcpu->freq_table[index].frequency;
@@ -346,11 +394,11 @@ static void cpufreq_zenx_timer(unsigned long data)
 			trace_cpufreq_zenx_notyet(
 				data, cpu_load, pcpu->target_freq,
 				pcpu->policy->cur, new_freq);
-			goto rearm;
+			rearm = 1;
+			goto call_hp_work;
 		}
 	}
 
-	pcpu->cur_load = load_since_change;
 	pcpu->floor_freq = new_freq;
 	pcpu->floor_validate_time = now;
 
@@ -358,7 +406,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 		trace_cpufreq_zenx_already(
 			data, cpu_load, pcpu->target_freq,
 			pcpu->policy->cur, new_freq);
-		goto rearm_if_notmax;
+		goto call_hp_work;
 	}
 
 	trace_cpufreq_zenx_target(data, cpu_load, pcpu->target_freq,
@@ -368,20 +416,36 @@ static void cpufreq_zenx_timer(unsigned long data)
 	pcpu->target_set_time = now;
 
 	pcpu->target_freq = new_freq;
-	spin_lock_irqsave(&freqscale_hotplug_cpumask_lock, flags);
-	cpumask_set_cpu(data, &freqscale_hotplug_cpumask);
-	spin_unlock_irqrestore(&freqscale_hotplug_cpumask_lock, flags);
-	wake_up_process(freqscale_hotplug_task);
+	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
+	cpumask_set_cpu(data, &speedchange_cpumask);
+	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
+	wake_up_process(speedchange_task);
 
-rearm_if_notmax:
-	/*
-	 * Already set max speed and don't see a need to change that,
-	 * wait until next idle to re-evaluate, don't need timer.
-	 */
-	if (pcpu->target_freq == pcpu->policy->max)
-		goto exit;
+call_hp_work:
+	if (data > 0 && data < 4) {
+		if (call_hp_add) {
+			spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
+			cpumask_set_cpu(data, &hotplug_add_cpumask);
+			spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
+			queue_work(hotplug_add_wq, &hotplug_add_work);
+		} else if (call_hp_remove) {
+			spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
+			cpumask_set_cpu(data, &hotplug_remove_cpumask);
+			spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
+			queue_work(hotplug_remove_wq, &hotplug_remove_work);
+		}
+	}
 
 rearm:
+	if (!rearm) {
+		/*
+		 * Already set max speed and don't see a need to change that,
+		 * wait until next idle to re-evaluate, don't need timer.
+		 */
+		if (pcpu->target_freq == pcpu->policy->max)
+			goto exit;
+	}
+
 	if (!timer_pending(&pcpu->cpu_timer)) {
 		/*
 		 * If governing speed in idle and already at min, cancel the
@@ -468,9 +532,71 @@ static void cpufreq_zenx_idle_end(void)
 	up_read(&pcpu->mutex);
 }
 
-static int cpufreq_zenx_freqscale_hotplug_task(void *data)
+static void cpufreq_zenx_hotplug_add_cpu_work(struct work_struct *work)
 {
-	u64 now;
+	cpumask_t tmp_mask;
+	unsigned int cpu;
+	unsigned long flags;
+	struct cpufreq_zenx_cpuinfo *pcpu;
+
+	spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
+	tmp_mask = hotplug_add_cpumask;
+	cpumask_clear(&hotplug_add_cpumask);
+	spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
+
+	for_each_cpu(cpu, &tmp_mask) {
+		pcpu = &per_cpu(cpuinfo, cpu);
+
+		if (!down_read_trylock(&pcpu->mutex))
+			continue;
+		if (!pcpu->governor_enabled) {
+			up_read(&pcpu->mutex);
+			continue;
+		}
+
+		if (cpu > 0 && !cpu_online(cpu)) {
+			mutex_lock(&set_speed_lock);
+			cpu_up(cpu);
+			mutex_unlock(&set_speed_lock);
+		}
+		up_read(&pcpu->mutex);
+	}
+}
+
+static void cpufreq_zenx_hotplug_remove_cpu_work(struct work_struct *work)
+{
+	cpumask_t tmp_mask;
+	unsigned int cpu;
+	unsigned long flags;
+	struct cpufreq_zenx_cpuinfo *pcpu;
+
+	spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
+	tmp_mask = hotplug_remove_cpumask;
+	cpumask_clear(&hotplug_remove_cpumask);
+	spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
+
+	for_each_cpu(cpu, &tmp_mask) {
+		pcpu = &per_cpu(cpuinfo, cpu);
+
+		if (!down_read_trylock(&pcpu->mutex))
+			continue;
+		if (!pcpu->governor_enabled) {
+			up_read(&pcpu->mutex);
+			continue;
+		}
+
+		if (cpu > 0 && cpu_online(cpu)) {
+			mutex_lock(&set_speed_lock);
+			cpu_down(cpu);
+			mutex_unlock(&set_speed_lock);
+		}
+
+		up_read(&pcpu->mutex);
+	}
+}
+
+static int cpufreq_zenx_speedchange_task(void *data)
+{
 	unsigned int cpu;
 	cpumask_t tmp_mask;
 	unsigned long flags;
@@ -478,29 +604,26 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 
 	while (1) {
 		set_current_state(TASK_INTERRUPTIBLE);
-		spin_lock_irqsave(&freqscale_hotplug_cpumask_lock, flags);
+		spin_lock_irqsave(&speedchange_cpumask_lock, flags);
 
-		if (cpumask_empty(&freqscale_hotplug_cpumask)) {
-			spin_unlock_irqrestore(&freqscale_hotplug_cpumask_lock,
+		if (cpumask_empty(&speedchange_cpumask)) {
+			spin_unlock_irqrestore(&speedchange_cpumask_lock,
 					       flags);
 			schedule();
 
 			if (kthread_should_stop())
 				break;
 
-			spin_lock_irqsave(&freqscale_hotplug_cpumask_lock, flags);
+			spin_lock_irqsave(&speedchange_cpumask_lock, flags);
 		}
 
 		set_current_state(TASK_RUNNING);
-		tmp_mask = freqscale_hotplug_cpumask;
-		cpumask_clear(&freqscale_hotplug_cpumask);
-		spin_unlock_irqrestore(&freqscale_hotplug_cpumask_lock, flags);
-
-		get_cpu_idle_time_us(smp_processor_id(), &now);
+		tmp_mask = speedchange_cpumask;
+		cpumask_clear(&speedchange_cpumask);
+		spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
 
 		for_each_cpu(cpu, &tmp_mask) {
-			unsigned int j, avg_load;
-			unsigned int total_load = 0;
+			unsigned int j;
 			unsigned int max_freq = 0;
 
 			pcpu = &per_cpu(cpuinfo, cpu);
@@ -511,6 +634,8 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 				up_read(&pcpu->mutex);
 				continue;
 			}
+
+			mutex_lock(&set_speed_lock);
 
 			for_each_cpu(j, pcpu->policy->cpus) {
 				struct cpufreq_zenx_cpuinfo *pjcpu =
@@ -524,91 +649,10 @@ static int cpufreq_zenx_freqscale_hotplug_task(void *data)
 				__cpufreq_driver_target(pcpu->policy,
 							max_freq,
 							CPUFREQ_RELATION_H);
+			mutex_unlock(&set_speed_lock);
 			trace_cpufreq_zenx_setspeed(cpu,
 						     pcpu->target_freq,
 						     pcpu->policy->cur);
-
-			/* Only do hotplugging work on CPU 0 */
-			if (cpu > 0) {
-				up_read(&pcpu->mutex);
-				continue;
-			}
-
-			/*
-			 * Compute average CPU load
-			 * Use cpu_online_mask to get the load across
-			 * all online CPUs.
-			 */
-			for_each_cpu(j, cpu_online_mask) {
-				struct cpufreq_zenx_cpuinfo *pjcpu =
-					&per_cpu(cpuinfo, j);
-
-				total_load += pjcpu->cur_load;
-			}
-			avg_load = total_load / num_online_cpus();
-
-			/*
-			 * Determine which CPUs to remove/insert.
-			 * Use cpu_possible_mask so we get online
-			 * and offline CPUs.
-			 */
-			for_each_possible_cpu(j) {
-				struct cpufreq_zenx_cpuinfo *pjcpu;
-
-				if (j == 0)
-					continue;
-				else if (j > 3)
-					break;
-
-				pjcpu = &per_cpu(cpuinfo, j);
-
-				/*
-				 * The logic for hotplugging works as follows:
-				 * if avg_load <= unplug_load[cpu], reset timers
-				 * about how long we've been ABOVE it and
-				 * figure out how long it has been since we've
-				 * been below unplug_load.
-				 * Logic works the same for last time we were above
-				 * unplug_load.
-				 */
-				if (avg_load <= unplug_load[j - 1]) {
-					/* Below: reset above counter */
-					pjcpu->total_above_unplug_time = 0;
-					pjcpu->last_time_above_unplug_time = 0;
-					if (!pjcpu->last_time_below_unplug_time) {
-						pjcpu->last_time_below_unplug_time = now;
-						pjcpu->total_below_unplug_time = 0;
-					} else {
-						pjcpu->total_below_unplug_time +=
-							now - pjcpu->last_time_below_unplug_time;
-					}
-				} else if (avg_load > unplug_load[j - 1]) {
-					/* Above: reset below counter */
-					pjcpu->total_below_unplug_time = 0;
-					pjcpu->last_time_below_unplug_time = 0;
-					if (!pjcpu->last_time_above_unplug_time) {
-						pjcpu->last_time_above_unplug_time = now;
-						pjcpu->total_above_unplug_time = 0;
-					} else {
-						pjcpu->total_above_unplug_time +=
-							now - pjcpu->last_time_above_unplug_time;
-					}
-				}
-
-				/*
-				 * If CPU is not online, it must be offline so there should
-				 * be no need to do another cpu_online check.
-				 * Also avoid the likely/unlikely branch prediction macros
-				 * as we have no idea if it's online or offline.
-				 */
-				if (cpu_online(j) &&
-				    pjcpu->total_below_unplug_time > unplug_delay) {
-					cpu_down(j);
-				} else if (!cpu_online(j) &&
-				    pjcpu->total_above_unplug_time > insert_delay) {
-					cpu_up(j);
-				}
-			}
 
 			up_read(&pcpu->mutex);
 		}
@@ -624,14 +668,14 @@ static void cpufreq_zenx_boost(void)
 	unsigned long flags;
 	struct cpufreq_zenx_cpuinfo *pcpu;
 
-	spin_lock_irqsave(&freqscale_hotplug_cpumask_lock, flags);
+	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
 
 	for_each_online_cpu(i) {
 		pcpu = &per_cpu(cpuinfo, i);
 
 		if (pcpu->target_freq < hispeed_freq) {
 			pcpu->target_freq = hispeed_freq;
-			cpumask_set_cpu(i, &freqscale_hotplug_cpumask);
+			cpumask_set_cpu(i, &speedchange_cpumask);
 			pcpu->target_set_time_in_idle =
 				get_cpu_idle_time_us(i, &pcpu->target_set_time);
 			pcpu->hispeed_validate_time = pcpu->target_set_time;
@@ -647,10 +691,10 @@ static void cpufreq_zenx_boost(void)
 		pcpu->floor_validate_time = ktime_to_us(ktime_get());
 	}
 
-	spin_unlock_irqrestore(&freqscale_hotplug_cpumask_lock, flags);
+	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
 
 	if (anyboost)
-		wake_up_process(freqscale_hotplug_task);
+		wake_up_process(speedchange_task);
 }
 
 static ssize_t show_target_loads(
@@ -839,49 +883,49 @@ static ssize_t store_unplug_load_cpu3(struct kobject *kobj,
 static struct global_attr unplug_load_cpu3_attr = __ATTR(unplug_load_cpu3, 0644,
 	show_unplug_load_cpu3, store_unplug_load_cpu3);
 
-static ssize_t show_unplug_delay(struct kobject *kobj,
+static ssize_t show_hot_remove_sampling_periods(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", unplug_delay);
+	return sprintf(buf, "%u\n", hot_remove_sampling_periods);
 }
 
-static ssize_t store_unplug_delay(struct kobject *kobj,
+static ssize_t store_hot_remove_sampling_periods(struct kobject *kobj,
 			struct attribute *attr, const char *buf, size_t count)
 {
 	int ret;
-	unsigned long val;
+	unsigned int val;
 
-	ret = strict_strtoul(buf, 0, &val);
+	ret = sscanf(buf, "%u\n", &val);
 	if (ret < 0)
 		return ret;
-	unplug_delay = val;
+	hot_remove_sampling_periods = val;
 	return count;
 }
 
-static struct global_attr unplug_delay_attr = __ATTR(unplug_delay, 0644,
-		show_unplug_delay, store_unplug_delay);
+static struct global_attr hot_remove_sampling_periods_attr = __ATTR(hot_remove_sampling_periods, 0644,
+		show_hot_remove_sampling_periods, store_hot_remove_sampling_periods);
 
-static ssize_t show_insert_delay(struct kobject *kobj,
+static ssize_t show_hot_add_sampling_periods(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", insert_delay);
+	return sprintf(buf, "%u\n", hot_add_sampling_periods);
 }
 
-static ssize_t store_insert_delay(struct kobject *kobj,
+static ssize_t store_hot_add_sampling_periods(struct kobject *kobj,
 			struct attribute *attr, const char *buf, size_t count)
 {
 	int ret;
-	unsigned long val;
+	unsigned int val;
 
-	ret = strict_strtoul(buf, 0, &val);
+	ret = sscanf(buf, "%u\n", &val);
 	if (ret < 0)
 		return ret;
-	insert_delay = val;
+	hot_add_sampling_periods = val;
 	return count;
 }
 
-static struct global_attr insert_delay_attr = __ATTR(insert_delay, 0644,
-		show_insert_delay, store_insert_delay);
+static struct global_attr hot_add_sampling_periods_attr = __ATTR(hot_add_sampling_periods, 0644,
+		show_hot_add_sampling_periods, store_hot_add_sampling_periods);
 
 static ssize_t show_min_sample_time(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -1005,8 +1049,8 @@ static struct attribute *zenx_attributes[] = {
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpu3_attr.attr,
-	&unplug_delay_attr.attr,
-	&insert_delay_attr.attr,
+	&hot_remove_sampling_periods_attr.attr,
+	&hot_add_sampling_periods_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
 	&boost.attr,
@@ -1071,11 +1115,9 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->hispeed_validate_time =
 				pcpu->target_set_time;
 			pcpu->governor_enabled = 1;
-			pcpu->total_below_unplug_time = 0;
-			pcpu->total_above_unplug_time = 0;
-			pcpu->last_time_below_unplug_time = 0;
-			pcpu->last_time_above_unplug_time = 0;
-			pcpu->cur_load = 0;
+			pcpu->nr_periods_add = 0;
+			pcpu->nr_periods_remove = 0;
+			pcpu->last_cpu_load = 0;
 			smp_wmb();
 			pcpu->cpu_timer.expires =
 				jiffies + usecs_to_jiffies(timer_rate);
@@ -1142,8 +1184,8 @@ static int __init cpufreq_zenx_init(void)
 	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
 	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
 	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPU3;
-	unplug_delay = DEFAULT_UNPLUG_DELAY;
-	insert_delay = DEFAULT_INSERT_DELAY;
+	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS ;
+	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS ;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 	timer_rate = DEFAULT_TIMER_RATE;
@@ -1161,19 +1203,40 @@ static int __init cpufreq_zenx_init(void)
 	}
 
 	spin_lock_init(&target_loads_lock);
-	spin_lock_init(&freqscale_hotplug_cpumask_lock);
+	spin_lock_init(&speedchange_cpumask_lock);
+	mutex_init(&set_speed_lock);
 
-	freqscale_hotplug_task =
-		kthread_create(cpufreq_zenx_freqscale_hotplug_task, NULL,
+	speedchange_task =
+		kthread_create(cpufreq_zenx_speedchange_task, NULL,
 			       "cfzenx");
-	if (IS_ERR(freqscale_hotplug_task))
-		return PTR_ERR(freqscale_hotplug_task);
+	if (IS_ERR(speedchange_task))
+		return PTR_ERR(speedchange_task);
 
-	sched_setscheduler_nocheck(freqscale_hotplug_task, SCHED_FIFO, &param);
-	get_task_struct(freqscale_hotplug_task);
+	sched_setscheduler_nocheck(speedchange_task, SCHED_FIFO, &param);
+	get_task_struct(speedchange_task);
 
 	/* NB: wake up so the thread does not look hung to the freezer */
-	wake_up_process(freqscale_hotplug_task);
+	wake_up_process(speedchange_task);
+
+	hotplug_add_wq = alloc_workqueue("hpaddzenx", 0, 1);
+	if (!hotplug_add_wq) {
+		put_task_struct(speedchange_task);
+		return -ENOMEM;
+	}
+
+	INIT_WORK(&hotplug_add_work, cpufreq_zenx_hotplug_add_cpu_work);
+
+	spin_lock_init(&hotplug_remove_cpumask_lock);
+
+	hotplug_remove_wq = alloc_workqueue("hpremovezenx", 0, 1);
+	if (!hotplug_remove_wq) {
+		put_task_struct(speedchange_task);
+		return -ENOMEM;
+	}
+
+	INIT_WORK(&hotplug_remove_work, cpufreq_zenx_hotplug_remove_cpu_work);
+
+	spin_lock_init(&hotplug_remove_cpumask_lock);
 
 	return cpufreq_register_governor(&cpufreq_gov_zenx);
 }
@@ -1187,8 +1250,10 @@ module_init(cpufreq_zenx_init);
 static void __exit cpufreq_zenx_exit(void)
 {
 	cpufreq_unregister_governor(&cpufreq_gov_zenx);
-	kthread_stop(freqscale_hotplug_task);
-	put_task_struct(freqscale_hotplug_task);
+	kthread_stop(speedchange_task);
+	put_task_struct(speedchange_task);
+	destroy_workqueue(hotplug_add_wq);
+	destroy_workqueue(hotplug_remove_wq);
 }
 
 module_exit(cpufreq_zenx_exit);

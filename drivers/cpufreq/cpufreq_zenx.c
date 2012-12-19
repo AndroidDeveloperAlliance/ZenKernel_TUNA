@@ -109,7 +109,7 @@ static unsigned int hot_remove_sampling_periods;
  * How many sampling periods must pass before we hot-add a CPU.
  * CPU load must be above unplug_load for this many periods.
  */
-#define DEFAULT_NR_ADD_PERIODS (25)
+#define DEFAULT_NR_ADD_PERIODS (20)
 static unsigned int hot_add_sampling_periods;
 
 /*
@@ -352,7 +352,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 			call_hp_remove = 1;
 
 		/* Don't bother with frequency if this CPU is offline */
-		if (cpu_is_offline(data))
+		if (!cpu_online(data))
 			goto call_hp_work;
 	}
 

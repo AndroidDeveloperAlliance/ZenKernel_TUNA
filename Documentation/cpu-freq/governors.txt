@@ -304,17 +304,15 @@ The CPUfreq governor "ZenX" behaves exactly the same as
 "interactive" when scaling frequencies.
 
 ZenX also hotplugs CPUs based on the average CPU load
-across all CPUs. For example, if unplug_load_cpu1 is set to 15
-and average CPU load is determined to be 10%. The governor
+across all CPUs. For example, if unplug_load_cpu1 is set to 25
+and average CPU load is calculated at <= 25%. The governor
 will choose to disable CPU1.
 
-The governor will not unplug a CPU unless the CPU load
-has been less than/equal to unplug_load[CPU] for unplug_delay.
-
-The governor will not insert a CPU unless the CPU load
-has been greater than unplug_load[CPU] for insert_delay.
-
-ZenX also inserts all CPUs on early suspend resume.
+The governor will not remove a CPU unless average load has been
+below or equal to unplug_load[cpu] for hot_remove_sampling_periods.
+l
+The governor will not add a CPU unless average load has been
+above unplug_load[cpu] for hot_add_sampling_periods.
 
 Hotplugging can be disabled per-CPU by setting 
 unplug_load_cpu[#] to 0.
@@ -361,11 +359,11 @@ not idle.  Default is 20000 uS.
 suspend_frequency: The target frequency we should apply when going into
 suspend.
 
-unplug_delay: How long CPU load should be below/equal to unplug_load[cpu] 
-before removing a CPU. Default is 5000000 uS. 
+hot_add_sampling_periods: How many sampling periods we need to be above
+unplug_load before adding a CPU.
 
-insert_delay: How long CPU load should be above unplug_load[cpu]
-before removing a CPU. Default is 80000 uS.
+hot_remove_sampling_periods: How many sampling periods we need to be below
+unplug_load before removing a CPU.
 
 unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
 Default is 25%

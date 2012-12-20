@@ -13,7 +13,7 @@
  * GNU General Public License for more details.
  *
  * Author: Mike Chan (mike@android.com)
- * Author: Brandon Berhent (bbedward@gmail.com)
+ * Author: Brandon Berhent (bbedward@androiddeveloperalliance.org)
  *
  */
 
@@ -336,6 +336,13 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (!pcpu->governor_enabled)
 		goto exit;
 
+	/*
+	 * Skip load calculation and frequency logic for this CPU
+	 * if it is offline.
+	 */
+	if (!cpu_online(data))
+		goto call_hp_work;
+
 	spin_lock(&pcpu->load_lock);
 	now = update_load(data);
 	delta_time = (unsigned int)(now - pcpu->cputime_speedadj_timestamp);
@@ -349,41 +356,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
 	cpu_load = loadadjfreq / pcpu->target_freq;
 	boosted = boost_val || now < boostpulse_endtime;
-
-	/* Skip hot-add/remove calculations for CPU 0 */
-	if (data > 0) {
-	        /*
-	         * Compute average load across all online CPUs
-        	 */
-        	for_each_cpu(cpu, cpu_online_mask) {
-			struct cpufreq_zenx_cpuinfo *pjcpu =
-				&per_cpu(cpuinfo, cpu);
-
-			total_load += pjcpu->last_cpu_load;
-		}
-		avg_load = total_load / num_online_cpus();
-
-		/*
-		 * Reset/Increment nr_periods we've been
-		 * here based on load.
-		 */
-		if (avg_load <= unplug_load[data - 1]) {
-			pcpu->nr_periods_add = 0;
-			pcpu->nr_periods_remove++;
-		} else if (avg_load > unplug_load[data - 1]) {
-			pcpu->nr_periods_remove = 0;
-			pcpu->nr_periods_add++;
-		}
-
-		if (pcpu->nr_periods_add > hot_add_sampling_periods)
-			call_hp_add = 1;
-		else if (pcpu->nr_periods_remove > hot_remove_sampling_periods)
-			call_hp_remove = 1;
-
-		/* Don't bother with frequency if this CPU is offline */
-		if (!cpu_online(data))
-			goto call_hp_work;
-	}
 
 	if (cpu_load >= go_hispeed_load || boosted) {
 		if (pcpu->target_freq < hispeed_freq) {
@@ -466,7 +438,36 @@ static void cpufreq_zenx_timer(unsigned long data)
 	wake_up_process(speedchange_task);
 
 call_hp_work:
+	/* Skip hot-add/remove calculations for CPU 0 */
 	if (data > 0) {
+	        /*
+	         * Compute average load across all online CPUs
+        	 */
+        	for_each_cpu(cpu, cpu_online_mask) {
+			struct cpufreq_zenx_cpuinfo *pjcpu =
+				&per_cpu(cpuinfo, cpu);
+
+			total_load += pjcpu->last_cpu_load;
+		}
+		avg_load = total_load / num_online_cpus();
+
+		/*
+		 * Reset/Increment nr_periods we've been
+		 * here based on load.
+		 */
+		if (avg_load <= unplug_load[data - 1]) {
+			pcpu->nr_periods_add = 0;
+			pcpu->nr_periods_remove++;
+		} else if (avg_load > unplug_load[data - 1]) {
+			pcpu->nr_periods_remove = 0;
+			pcpu->nr_periods_add++;
+		}
+
+		if (pcpu->nr_periods_add > hot_add_sampling_periods)
+			call_hp_add = 1;
+		else if (pcpu->nr_periods_remove > hot_remove_sampling_periods)
+			call_hp_remove = 1;
+
 		if (call_hp_add) {
 			spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
 			cpumask_set_cpu(data, &hotplug_add_cpumask);
@@ -1376,6 +1377,8 @@ static void __exit cpufreq_zenx_exit(void)
 module_exit(cpufreq_zenx_exit);
 
 MODULE_AUTHOR("Mike Chan <mike@android.com>");
+MODULE_AUTHOR("Brandon Berhent <bbedward@androiddeveloperalliance.org>");
 MODULE_DESCRIPTION("'cpufreq_zenx' - A cpufreq governor for "
-	"Latency sensitive workloads");
+	"Latency sensitive workloads with load-based hotplugging.");
+MODULE_VERSION("2.0");
 MODULE_LICENSE("GPL");

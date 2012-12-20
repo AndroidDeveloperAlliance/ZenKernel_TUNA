@@ -50,7 +50,7 @@ struct cpufreq_interactive_cpuinfo {
 	unsigned int floor_freq;
 	u64 floor_validate_time;
 	u64 hispeed_validate_time;
-	struct rw_semaphore mutex;
+	struct rw_semaphore enable_sem;
 	int governor_enabled;
 };
 
@@ -278,7 +278,7 @@ static void cpufreq_interactive_timer(unsigned long data)
 	unsigned long flags;
 	bool boosted;
 
-	if (!down_read_trylock(&pcpu->mutex))
+	if (!down_read_trylock(&pcpu->enable_sem))
 		return;
 	if (!pcpu->governor_enabled)
 		goto exit;
@@ -379,7 +379,7 @@ rearm:
 		cpufreq_interactive_timer_resched(pcpu);
 
 exit:
-	up_read(&pcpu->mutex);
+	up_read(&pcpu->enable_sem);
 	return;
 }
 
@@ -389,10 +389,10 @@ static void cpufreq_interactive_idle_start(void)
 		&per_cpu(cpuinfo, smp_processor_id());
 	int pending;
 
-	if (!down_read_trylock(&pcpu->mutex))
+	if (!down_read_trylock(&pcpu->enable_sem))
 		return;
 	if (!pcpu->governor_enabled) {
-		up_read(&pcpu->mutex);
+		up_read(&pcpu->enable_sem);
 		return;
 	}
 
@@ -411,7 +411,7 @@ static void cpufreq_interactive_idle_start(void)
 			cpufreq_interactive_timer_resched(pcpu);
 	}
 
-	up_read(&pcpu->mutex);
+	up_read(&pcpu->enable_sem);
 }
 
 static void cpufreq_interactive_idle_end(void)
@@ -419,10 +419,10 @@ static void cpufreq_interactive_idle_end(void)
 	struct cpufreq_interactive_cpuinfo *pcpu =
 		&per_cpu(cpuinfo, smp_processor_id());
 
-	if (!down_read_trylock(&pcpu->mutex))
+	if (!down_read_trylock(&pcpu->enable_sem))
 		return;
 	if (!pcpu->governor_enabled) {
-		up_read(&pcpu->mutex);
+		up_read(&pcpu->enable_sem);
 		return;
 	}
 
@@ -435,7 +435,7 @@ static void cpufreq_interactive_idle_end(void)
 		cpufreq_interactive_timer(smp_processor_id());
 	}
 
-	up_read(&pcpu->mutex);
+	up_read(&pcpu->enable_sem);
 }
 
 static int cpufreq_interactive_speedchange_task(void *data)
@@ -470,10 +470,10 @@ static int cpufreq_interactive_speedchange_task(void *data)
 			unsigned int max_freq = 0;
 
 			pcpu = &per_cpu(cpuinfo, cpu);
-			if (!down_read_trylock(&pcpu->mutex))
+			if (!down_read_trylock(&pcpu->enable_sem))
 				continue;
 			if (!pcpu->governor_enabled) {
-				up_read(&pcpu->mutex);
+				up_read(&pcpu->enable_sem);
 				continue;
 			}
 
@@ -493,7 +493,7 @@ static int cpufreq_interactive_speedchange_task(void *data)
 						     pcpu->target_freq,
 						     pcpu->policy->cur);
 
-			up_read(&pcpu->mutex);
+			up_read(&pcpu->enable_sem);
 		}
 	}
 
@@ -944,11 +944,11 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *policy,
 	case CPUFREQ_GOV_STOP:
 		for_each_cpu(j, policy->cpus) {
 			pcpu = &per_cpu(cpuinfo, j);
-			down_write(&pcpu->mutex);
+			down_write(&pcpu->enable_sem);
 			pcpu->governor_enabled = 0;
 			del_timer_sync(&pcpu->cpu_timer);
 			del_timer_sync(&pcpu->cpu_slack_timer);
-			up_write(&pcpu->mutex);
+			up_write(&pcpu->enable_sem);
 		}
 
 		if (atomic_dec_return(&active_count) > 0)
@@ -998,7 +998,7 @@ static int __init cpufreq_interactive_init(void)
 		init_timer(&pcpu->cpu_slack_timer);
 		pcpu->cpu_slack_timer.function = cpufreq_interactive_nop_timer;
 		spin_lock_init(&pcpu->load_lock);
-		init_rwsem(&pcpu->mutex);
+		init_rwsem(&pcpu->enable_sem);
 	}
 
 	spin_lock_init(&target_loads_lock);

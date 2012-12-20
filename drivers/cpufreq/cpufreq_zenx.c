@@ -84,10 +84,10 @@ static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
 #define DEFAULT_UNPLUG_LOAD_CPU1 25
-#define DEFAULT_UNPLUG_LOAD_CPU2 60
-#define DEFAULT_UNPLUG_LOAD_CPU3 75
+#define DEFAULT_UNPLUG_LOAD_CPU2 50
+#define DEFAULT_UNPLUG_LOAD_CPUMORE 50
 
-static unsigned int unplug_load[3];
+static unsigned int unplug_load[7];
 
 /* Target load.  Lower values result in higher CPU speeds. */
 #define DEFAULT_TARGET_LOAD 90
@@ -278,7 +278,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int new_freq;
 	unsigned int index;
 	unsigned int total_load = 0;
-	unsigned int rearm = 0;
+	unsigned int rearm_if_notmax = 0;
 	unsigned int call_hp_add = 0;
 	unsigned int call_hp_remove = 0;
 	unsigned long flags;
@@ -298,7 +298,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 * If timer ran less than 1ms after short-term sample started, retry.
 	 */
 	if (delta_time < 1000) {
-		rearm = 1;
 		goto rearm;
 	}
 
@@ -310,7 +309,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	pcpu->last_cpu_load = cpu_load;
 
 	/* Skip hot-add/remove calculations for CPU 0 */
-	if (data > 0 && data < 4) {
+	if (data > 0) {
 	        /*
 	         * Compute average load across all online CPUs
         	 */
@@ -356,7 +355,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 		trace_cpufreq_zenx_notyet(
 			data, cpu_load, pcpu->target_freq,
 			pcpu->policy->cur, new_freq);
-		rearm = 1;
 		goto call_hp_work;
 	}
 
@@ -367,7 +365,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
-		rearm = 1;
 		goto call_hp_work;
 	}
 
@@ -382,7 +379,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 			trace_cpufreq_zenx_notyet(
 				data, cpu_load, pcpu->target_freq,
 				pcpu->policy->cur, new_freq);
-			rearm = 1;
 			goto call_hp_work;
 		}
 	}
@@ -394,6 +390,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 		trace_cpufreq_zenx_already(
 			data, cpu_load, pcpu->target_freq,
 			pcpu->policy->cur, new_freq);
+		rearm_if_notmax = 1;
 		goto call_hp_work;
 	}
 
@@ -407,7 +404,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	wake_up_process(speedchange_task);
 
 call_hp_work:
-	if (data > 0 && data < 4) {
+	if (data > 0) {
 		if (call_hp_add) {
 			spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
 			cpumask_set_cpu(data, &hotplug_add_cpumask);
@@ -422,7 +419,7 @@ call_hp_work:
 	}
 
 rearm:
-	if (!rearm) {
+	if (rearm_if_notmax) {
 		/*
 		 * Already set max speed and don't see a need to change that,
 		 * wait until next idle to re-evaluate, don't need timer.
@@ -845,13 +842,13 @@ static ssize_t store_unplug_load_cpu2(struct kobject *kobj,
 static struct global_attr unplug_load_cpu2_attr = __ATTR(unplug_load_cpu2, 0644,
 	show_unplug_load_cpu2, store_unplug_load_cpu2);
 
-static ssize_t show_unplug_load_cpu3(struct kobject *kobj,
+static ssize_t show_unplug_load_cpumore(struct kobject *kobj,
 				     struct attribute *attr, char *buf)
 {
 	return sprintf(buf, "%u\n", unplug_load[2]);
 }
 
-static ssize_t store_unplug_load_cpu3(struct kobject *kobj,
+static ssize_t store_unplug_load_cpumore(struct kobject *kobj,
 			struct attribute *attr, const char *buf, size_t count)
 {
 	int ret;
@@ -864,8 +861,8 @@ static ssize_t store_unplug_load_cpu3(struct kobject *kobj,
         return count;
 }
 
-static struct global_attr unplug_load_cpu3_attr = __ATTR(unplug_load_cpu3, 0644,
-	show_unplug_load_cpu3, store_unplug_load_cpu3);
+static struct global_attr unplug_load_cpumore_attr = __ATTR(unplug_load_cpumore, 0644,
+	show_unplug_load_cpumore, store_unplug_load_cpumore);
 
 static ssize_t show_hot_remove_sampling_periods(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -1032,7 +1029,7 @@ static struct attribute *zenx_attributes[] = {
 	&above_hispeed_delay.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
-	&unplug_load_cpu3_attr.attr,
+	&unplug_load_cpumore_attr.attr,
 	&hot_remove_sampling_periods_attr.attr,
 	&hot_add_sampling_periods_attr.attr,
 	&min_sample_time_attr.attr,
@@ -1164,7 +1161,11 @@ static int __init cpufreq_zenx_init(void)
 	go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
 	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
 	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
-	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPU3;
+	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPUMORE;
+	unplug_load[3] = unplug_load[2];
+	unplug_load[4] = unplug_load[2];
+	unplug_load[5] = unplug_load[2];
+	unplug_load[6] = unplug_load[2];
 	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS ;
 	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS ;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;

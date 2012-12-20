@@ -41,7 +41,7 @@ static atomic_t active_count = ATOMIC_INIT(0);
 
 struct cpufreq_zenx_cpuinfo {
 	struct timer_list cpu_timer;
-	int timer_idlecancel;
+	struct timer_list cpu_slack_timer;
 	spinlock_t load_lock; /* protects the next 4 fields */
 	u64 time_in_idle;
 	u64 time_in_idle_timestamp;
@@ -139,10 +139,12 @@ static int boostpulse_duration_val = DEFAULT_MIN_SAMPLE_TIME;
 /* End time of boost pulse in ktime converted to usecs */
 static u64 boostpulse_endtime;
 
-static bool governidle;
-module_param(governidle, bool, S_IWUSR | S_IRUGO);
-MODULE_PARM_DESC(governidle,
-	"Set to 1 to wake up CPUs from idle to reduce speed (default 0)");
+/*
+ * Max additional time to wait in idle, beyond timer_rate, at speeds above
+ * minimum before wakeup to reduce speed, or -1 if unnecessary.
+ */
+#define DEFAULT_TIMER_SLACK (4 * DEFAULT_TIMER_RATE)
+static int timer_slack_val = DEFAULT_TIMER_SLACK;
 
 static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		unsigned int event);
@@ -160,8 +162,14 @@ struct cpufreq_governor cpufreq_gov_zenx = {
 static void cpufreq_zenx_timer_resched(
 	struct cpufreq_zenx_cpuinfo *pcpu)
 {
-	mod_timer_pinned(&pcpu->cpu_timer,
-			 jiffies + usecs_to_jiffies(timer_rate));
+	unsigned long expires = jiffies + usecs_to_jiffies(timer_rate);
+
+	mod_timer_pinned(&pcpu->cpu_timer, expires);
+	if (timer_slack_val >= 0 && pcpu->target_freq > pcpu->policy->min) {
+		expires += usecs_to_jiffies(timer_slack_val);
+		mod_timer_pinned(&pcpu->cpu_slack_timer, expires);
+	}
+
 	spin_lock(&pcpu->load_lock);
 	pcpu->time_in_idle =
 		get_cpu_idle_time_us(smp_processor_id(),
@@ -463,17 +471,8 @@ rearm:
 			goto exit;
 	}
 
-	if (!timer_pending(&pcpu->cpu_timer)) {
-		/*
-		 * If governing speed in idle and already at min, cancel the
-		 * timer if that CPU goes idle.  We don't need to re-evaluate
-		 * speed until the next idle exit.
-		 */
-		if (governidle && pcpu->target_freq == pcpu->policy->min)
-			pcpu->timer_idlecancel = 1;
-
+	if (!timer_pending(&pcpu->cpu_timer))
 		cpufreq_zenx_timer_resched(pcpu);
-	}
 
 exit:
 	up_read(&pcpu->mutex);
@@ -504,21 +503,8 @@ static void cpufreq_zenx_idle_start(void)
 		 * min indefinitely.  This should probably be a quirk of
 		 * the CPUFreq driver.
 		 */
-		if (!pending) {
-			pcpu->timer_idlecancel = 0;
+		if (!pending)
 			cpufreq_zenx_timer_resched(pcpu);
-		}
-	} else if (governidle) {
-		/*
-		 * If at min speed and entering idle after load has
-		 * already been evaluated, and a timer has been set just in
-		 * case the CPU suddenly goes busy, cancel that timer.  The
-		 * CPU didn't go busy; we'll recheck things upon idle exit.
-		 */
-		if (pending && pcpu->timer_idlecancel) {
-			del_timer(&pcpu->cpu_timer);
-			pcpu->timer_idlecancel = 0;
-		}
 	}
 
 	up_read(&pcpu->mutex);
@@ -538,11 +524,10 @@ static void cpufreq_zenx_idle_end(void)
 
 	/* Arm the timer for 1-2 ticks later if not already. */
 	if (!timer_pending(&pcpu->cpu_timer)) {
-		pcpu->timer_idlecancel = 0;
 		cpufreq_zenx_timer_resched(pcpu);
-	} else if (!governidle &&
-		   time_after_eq(jiffies, pcpu->cpu_timer.expires)) {
+	} else if (time_after_eq(jiffies, pcpu->cpu_timer.expires)) {
 		del_timer(&pcpu->cpu_timer);
+		del_timer(&pcpu->cpu_slack_timer);
 		cpufreq_zenx_timer(smp_processor_id());
 	}
 
@@ -1035,6 +1020,29 @@ static ssize_t store_timer_rate(struct kobject *kobj,
 static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 		show_timer_rate, store_timer_rate);
 
+static ssize_t show_timer_slack(
+	struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", timer_slack_val);
+}
+
+static ssize_t store_timer_slack(
+	struct kobject *kobj, struct attribute *attr, const char *buf,
+	size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = kstrtol(buf, 10, &val);
+	if (ret < 0)
+		return ret;
+
+	timer_slack_val = val;
+	return count;
+}
+
+define_one_global_rw(timer_slack);
+
 static ssize_t show_boost(struct kobject *kobj, struct attribute *attr,
 			  char *buf)
 {
@@ -1119,6 +1127,7 @@ static struct attribute *zenx_attributes[] = {
 	&hot_add_sampling_periods_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
+	&timer_slack.attr,
 	&boost.attr,
 	&boostpulse.attr,
 	&boostpulse_duration.attr,
@@ -1169,6 +1178,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			hispeed_freq = policy->max;
 
 		for_each_cpu(j, policy->cpus) {
+			unsigned long expires;
+
 			pcpu = &per_cpu(cpuinfo, j);
 			pcpu->policy = policy;
 			pcpu->target_freq = policy->cur;
@@ -1183,9 +1194,15 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->nr_periods_remove = 0;
 			pcpu->last_cpu_load = 0;
 			smp_wmb();
-			pcpu->cpu_timer.expires =
-				jiffies + usecs_to_jiffies(timer_rate);
+			expires = jiffies + usecs_to_jiffies(timer_rate);
+			pcpu->cpu_timer.expires = expires;
 			add_timer_on(&pcpu->cpu_timer, j);
+
+			if (timer_slack_val >= 0) {
+				expires += usecs_to_jiffies(timer_slack_val);
+				pcpu->cpu_slack_timer.expires = expires;
+				add_timer_on(&pcpu->cpu_slack_timer, j);
+			}
 		}
 
 		/*
@@ -1211,6 +1228,7 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			down_write(&pcpu->mutex);
 			pcpu->governor_enabled = 0;
 			del_timer_sync(&pcpu->cpu_timer);
+			del_timer_sync(&pcpu->cpu_slack_timer);
 			up_write(&pcpu->mutex);
 		}
 
@@ -1242,6 +1260,10 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 	return 0;
 }
 
+static void cpufreq_zenx_nop_timer(unsigned long data)
+{
+}
+
 static int __init cpufreq_zenx_init(void)
 {
 	unsigned int i;
@@ -1265,12 +1287,11 @@ static int __init cpufreq_zenx_init(void)
 	/* Initalize per-cpu timers */
 	for_each_possible_cpu(i) {
 		pcpu = &per_cpu(cpuinfo, i);
-		if (governidle)
-			init_timer(&pcpu->cpu_timer);
-		else
-			init_timer_deferrable(&pcpu->cpu_timer);
+		init_timer_deferrable(&pcpu->cpu_timer);
 		pcpu->cpu_timer.function = cpufreq_zenx_timer;
 		pcpu->cpu_timer.data = i;
+		init_timer(&pcpu->cpu_slack_timer);
+		pcpu->cpu_slack_timer.function = cpufreq_zenx_nop_timer;
 		spin_lock_init(&pcpu->load_lock);
 		init_rwsem(&pcpu->mutex);
 	}

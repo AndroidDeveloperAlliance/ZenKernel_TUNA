@@ -376,11 +376,18 @@ static void cpufreq_zenx_timer(unsigned long data)
 			goto call_hp_work;
 	}
 
-	if ((cpu_load >= go_hispeed_load || boosted) &&
-	    pcpu->target_freq < hispeed_freq)
-		new_freq = hispeed_freq;
-	else
+	if (cpu_load >= go_hispeed_load || boosted) {
+		if (pcpu->target_freq < hispeed_freq) {
+			new_freq = hispeed_freq;
+		} else {
+			new_freq = choose_freq(pcpu, loadadjfreq);
+
+			if (new_freq < hispeed_freq)
+				new_freq = hispeed_freq;
+		}
+	} else {
 		new_freq = choose_freq(pcpu, loadadjfreq);
+	}
 
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&

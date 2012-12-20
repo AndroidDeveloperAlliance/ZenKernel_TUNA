@@ -362,7 +362,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 			total_load += pjcpu->last_cpu_load;
 		}
 		avg_load = total_load / num_online_cpus();
-		pr_info("AVG_LOAD %u", avg_load);
 
 		/*
 		 * Reset/Increment nr_periods we've been

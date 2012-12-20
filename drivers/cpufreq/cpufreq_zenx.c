@@ -42,8 +42,11 @@ static atomic_t active_count = ATOMIC_INIT(0);
 struct cpufreq_zenx_cpuinfo {
 	struct timer_list cpu_timer;
 	int timer_idlecancel;
+	spinlock_t load_lock; /* protects the next 4 fields */
 	u64 time_in_idle;
 	u64 time_in_idle_timestamp;
+	u64 cputime_speedadj;
+	u64 cputime_speedadj_timestamp;
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
@@ -158,9 +161,13 @@ static void cpufreq_zenx_timer_resched(
 {
 	mod_timer_pinned(&pcpu->cpu_timer,
 			 jiffies + usecs_to_jiffies(timer_rate));
+	spin_lock(&pcpu->load_lock);
 	pcpu->time_in_idle =
 		get_cpu_idle_time_us(smp_processor_id(),
 				     &pcpu->time_in_idle_timestamp);
+	pcpu->cputime_speedadj = 0;
+	pcpu->cputime_speedadj_timestamp = pcpu->time_in_idle_timestamp;
+	spin_unlock(&pcpu->load_lock);
 }
 
 static unsigned int freq_to_targetload(unsigned int freq)
@@ -185,10 +192,9 @@ static unsigned int freq_to_targetload(unsigned int freq)
  */
 
 static unsigned int choose_freq(
-	struct cpufreq_zenx_cpuinfo *pcpu, unsigned int curload)
+	struct cpufreq_zenx_cpuinfo *pcpu, unsigned int loadadjfreq)
 {
 	unsigned int freq = pcpu->policy->cur;
-	unsigned int loadadjfreq = freq * curload;
 	unsigned int prevfreq, freqmin, freqmax;
 	unsigned int tl;
 	int index;
@@ -266,16 +272,36 @@ static unsigned int choose_freq(
 	return freq;
 }
 
+static u64 update_load(int cpu)
+{
+	struct cpufreq_zenx_cpuinfo *pcpu = &per_cpu(cpuinfo, cpu);
+	u64 now;
+	u64 now_idle;
+	unsigned int delta_idle;
+	unsigned int delta_time;
+	u64 active_time;
+
+	now_idle = get_cpu_idle_time_us(cpu, &now);
+	delta_idle = (unsigned int)(now_idle - pcpu->time_in_idle);
+	delta_time = (unsigned int)(now - pcpu->time_in_idle_timestamp);
+	active_time = delta_time - delta_idle;
+	pcpu->cputime_speedadj += active_time * pcpu->policy->cur;
+
+	pcpu->time_in_idle = now_idle;
+	pcpu->time_in_idle_timestamp = now;
+	return now;
+}
+
 static void cpufreq_zenx_timer(unsigned long data)
 {
 	u64 now;
-	unsigned int delta_idle;
 	unsigned int delta_time;
+	u64 cputime_speedadj;
 	unsigned int cpu, cpu_load, avg_load;
 	struct cpufreq_zenx_cpuinfo *pcpu =
 		&per_cpu(cpuinfo, data);
-	u64 now_idle;
 	unsigned int new_freq;
+	unsigned int loadadjfreq;
 	unsigned int index;
 	unsigned int total_load = 0;
 	unsigned int rearm_if_notmax = 0;
@@ -289,22 +315,18 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (!pcpu->governor_enabled)
 		goto exit;
 
-	now_idle = get_cpu_idle_time_us(data, &now);
+	spin_lock(&pcpu->load_lock);
+	now = update_load(data);
+	delta_time = (unsigned int)(now - pcpu->cputime_speedadj_timestamp);
+	cputime_speedadj = pcpu->cputime_speedadj;
+	spin_unlock(&pcpu->load_lock);
 
-	delta_idle = (unsigned int)(now_idle - pcpu->time_in_idle);
-	delta_time = (unsigned int)(now - pcpu->time_in_idle_timestamp);
-
-	/*
-	 * If timer ran less than 1ms after short-term sample started, retry.
-	 */
-	if (delta_time < 1000) {
+	if (WARN_ON_ONCE(!delta_time))
 		goto rearm;
-	}
 
-	if (delta_idle > delta_time)
-		cpu_load = 0;
-	else
-		cpu_load = 100 * (delta_time - delta_idle) / delta_time;
+	do_div(cputime_speedadj, delta_time);
+	loadadjfreq = (unsigned int)cputime_speedadj * 100;
+	cpu_load = loadadjfreq / pcpu->target_freq;
 
 	pcpu->last_cpu_load = cpu_load;
 
@@ -347,7 +369,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	    pcpu->target_freq < hispeed_freq)
 		new_freq = hispeed_freq;
 	else
-		new_freq = choose_freq(pcpu, cpu_load);
+		new_freq = choose_freq(pcpu, loadadjfreq);
 
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
@@ -677,6 +699,32 @@ static void cpufreq_zenx_boost(void)
 	if (anyboost)
 		wake_up_process(speedchange_task);
 }
+
+static int cpufreq_zenx_notifier(
+	struct notifier_block *nb, unsigned long val, void *data)
+{
+	struct cpufreq_freqs *freq = data;
+	struct cpufreq_zenx_cpuinfo *pcpu;
+	int cpu;
+
+	if (val == CPUFREQ_POSTCHANGE) {
+		pcpu = &per_cpu(cpuinfo, freq->cpu);
+
+		for_each_cpu(cpu, pcpu->policy->cpus) {
+			struct cpufreq_zenx_cpuinfo *pjcpu =
+				&per_cpu(cpuinfo, cpu);
+			spin_lock(&pjcpu->load_lock);
+			update_load(cpu);
+			spin_unlock(&pjcpu->load_lock);
+		}
+	}
+
+	return 0;
+}
+
+static struct notifier_block cpufreq_notifier_block = {
+	.notifier_call = cpufreq_zenx_notifier,
+};
 
 static ssize_t show_target_loads(
 	struct kobject *kobj, struct attribute *attr, char *buf)
@@ -1115,6 +1163,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			return rc;
 
 		idle_notifier_register(&cpufreq_zenx_idle_nb);
+		cpufreq_register_notifier(
+			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
 		break;
 
 	case CPUFREQ_GOV_STOP:
@@ -1129,6 +1179,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		if (atomic_dec_return(&active_count) > 0)
 			return 0;
 
+		cpufreq_unregister_notifier(
+			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
 		idle_notifier_unregister(&cpufreq_zenx_idle_nb);
 		sysfs_remove_group(cpufreq_global_kobject,
 				&zenx_attr_group);
@@ -1181,6 +1233,7 @@ static int __init cpufreq_zenx_init(void)
 			init_timer_deferrable(&pcpu->cpu_timer);
 		pcpu->cpu_timer.function = cpufreq_zenx_timer;
 		pcpu->cpu_timer.data = i;
+		spin_lock_init(&pcpu->load_lock);
 		init_rwsem(&pcpu->mutex);
 	}
 

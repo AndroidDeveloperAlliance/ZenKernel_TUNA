@@ -48,11 +48,6 @@ struct sio_data {
 	int writes_starved;
 };
 
-static inline struct sio_data *
-sio_get_data(struct request_queue *q) {
-	return q->elevator->elevator_data;
-}
-
 static void
 sio_merged_requests(struct request_queue *q, struct request *rq,
 		    struct request *next)
@@ -75,7 +70,7 @@ sio_merged_requests(struct request_queue *q, struct request *rq,
 static void
 sio_add_request(struct request_queue *q, struct request *rq)
 {
-	struct sio_data *sd = sio_get_data(q);
+	struct sio_data *sd = q->elevator->elevator_data;
 	const int sync = rq_is_sync(rq);
 	const int data_dir = rq_data_dir(rq);
 
@@ -180,7 +175,7 @@ sio_dispatch_request(struct sio_data *sd, struct request *rq)
 static int
 sio_dispatch_requests(struct request_queue *q, int force)
 {
-	struct sio_data *sd = sio_get_data(q);
+	struct sio_data *sd = q->elevator->elevator_data;
 	struct request *rq = NULL;
 	int data_dir = READ;
 

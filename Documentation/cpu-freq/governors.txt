@@ -369,10 +369,10 @@ unplug_load_cpu1: CPU load that we should unplug CPU 1 at.
 Default is 25%
 
 unplug_load_cpu2: CPU load that we should unplug CPU 2 at.
-default is 60%
+default is 50%
 
-unplug_load_cpu3: CPU load that we should unplug CPU 3 at.
-default is 75%
+unplug_load_cpumore: CPU load that we should unplug CPUs 3-7 at.
+default is 50%
 
 3. The Governor Interface in the CPUfreq Core
 =============================================

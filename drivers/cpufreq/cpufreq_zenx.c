@@ -47,6 +47,8 @@ struct cpufreq_zenx_cpuinfo {
 	u64 time_in_idle_timestamp;
 	u64 cputime_speedadj;
 	u64 cputime_speedadj_timestamp;
+	u64 target_set_time;
+	u64 target_set_time_in_idle;
 	struct cpufreq_policy *policy;
 	struct cpufreq_frequency_table *freq_table;
 	unsigned int target_freq;
@@ -86,7 +88,7 @@ static unsigned int hispeed_freq;
 static unsigned long go_hispeed_load;
 
 /* Unplug auxillary CPUs below these values. */
-#define DEFAULT_UNPLUG_LOAD_CPU1 25
+#define DEFAULT_UNPLUG_LOAD_CPU1 35
 #define DEFAULT_UNPLUG_LOAD_CPU2 50
 #define DEFAULT_UNPLUG_LOAD_CPUMORE 50
 
@@ -103,7 +105,7 @@ static int ntarget_loads = ARRAY_SIZE(default_target_loads);
  * How many sampling periods must pass before we hot-remove a CPU.
  * CPU load must be below unplug_load for this many periods.
  */
-#define DEFAULT_NR_REMOVE_PERIODS (100)
+#define DEFAULT_NR_REMOVE_PERIODS (75)
 static unsigned int hot_remove_sampling_periods;
 
 /*
@@ -298,6 +300,15 @@ static u64 update_load(int cpu)
 
 	pcpu->time_in_idle = now_idle;
 	pcpu->time_in_idle_timestamp = now;
+
+	/* Compute load since last frequency change */
+	delta_idle = (unsigned int)(now_idle - pcpu->target_set_time_in_idle);
+	delta_time = (unsigned int)(now - pcpu->target_set_time);
+	if ((delta_time == 0) || (delta_idle > delta_time))
+		pcpu->last_cpu_load = 0;
+	else
+		pcpu->last_cpu_load = 100 * (delta_time - delta_idle) / delta_time;
+
 	return now;
 }
 
@@ -339,8 +350,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	cpu_load = loadadjfreq / pcpu->target_freq;
 	boosted = boost_val || now < boostpulse_endtime;
 
-	pcpu->last_cpu_load = cpu_load;
-
 	/* Skip hot-add/remove calculations for CPU 0 */
 	if (data > 0) {
 	        /*
@@ -353,6 +362,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 			total_load += pjcpu->last_cpu_load;
 		}
 		avg_load = total_load / num_online_cpus();
+		pr_info("AVG_LOAD %u", avg_load);
 
 		/*
 		 * Reset/Increment nr_periods we've been
@@ -446,6 +456,9 @@ static void cpufreq_zenx_timer(unsigned long data)
 
 	trace_cpufreq_zenx_target(data, cpu_load, pcpu->target_freq,
 					 pcpu->policy->cur, new_freq);
+
+	pcpu->target_set_time_in_idle = pcpu->time_in_idle;
+	pcpu->target_set_time = now;
 
 	pcpu->target_freq = new_freq;
 	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
@@ -685,8 +698,9 @@ static void cpufreq_zenx_boost(void)
 		if (pcpu->target_freq < hispeed_freq) {
 			pcpu->target_freq = hispeed_freq;
 			cpumask_set_cpu(i, &speedchange_cpumask);
-			pcpu->hispeed_validate_time =
-				ktime_to_us(ktime_get());
+			pcpu->target_set_time_in_idle =
+				get_cpu_idle_time_us(i, &pcpu->target_set_time);
+			pcpu->hispeed_validate_time = pcpu->target_set_time;
 			anyboost = 1;
 		}
 
@@ -1191,11 +1205,14 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->policy = policy;
 			pcpu->target_freq = policy->cur;
 			pcpu->freq_table = freq_table;
+			pcpu->target_set_time_in_idle =
+				get_cpu_idle_time_us(j,
+					&pcpu->target_set_time);
 			pcpu->floor_freq = pcpu->target_freq;
 			pcpu->floor_validate_time =
-				ktime_to_us(ktime_get());
+				pcpu->target_set_time;
 			pcpu->hispeed_validate_time =
-				pcpu->floor_validate_time;
+				pcpu->target_set_time;
 			pcpu->governor_enabled = 1;
 			pcpu->nr_periods_add = 0;
 			pcpu->nr_periods_remove = 0;

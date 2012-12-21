@@ -57,6 +57,8 @@ struct cpufreq_zenx_cpuinfo {
 	unsigned int last_cpu_load;
 	unsigned int nr_periods_add;
 	unsigned int nr_periods_remove;
+	unsigned int add_avg_load;
+	unsigned int remove_avg_load;
 	u64 floor_validate_time;
 	u64 hispeed_validate_time;
 	struct rw_semaphore enable_sem;
@@ -99,21 +101,21 @@ static unsigned long go_hispeed_load_suspended;
 static unsigned int unplug_load[7];
 
 /*
- * How many sampling periods must pass before we hot-remove a CPU.
- * CPU load must be below unplug_load for this many periods.
+ * Number of sampling periods to take average CPU load across
+ * for CPU removal.
  */
-#define DEFAULT_NR_REMOVE_PERIODS (60)
-#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (40)
+#define DEFAULT_NR_REMOVE_PERIODS (100)
+#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (50)
 static unsigned int curr_hot_remove_sampling_periods;
 static unsigned int hot_remove_sampling_periods;
 static unsigned int hot_remove_sampling_periods_suspended;
 
 /*
- * How many sampling periods must pass before we hot-add a CPU.
- * CPU load must be above unplug_load for this many periods.
+ * Number of sampling periods to take average CPU load across
+ * for CPU add.
  */
-#define DEFAULT_NR_ADD_PERIODS (20)
-#define DEFAULT_NR_ADD_PERIODS_SUSPENDED (35)
+#define DEFAULT_NR_ADD_PERIODS (30)
+#define DEFAULT_NR_ADD_PERIODS_SUSPENDED (100)
 static unsigned int curr_hot_add_sampling_periods;
 static unsigned int hot_add_sampling_periods;
 static unsigned int hot_add_sampling_periods_suspended;
@@ -205,14 +207,6 @@ static u64 update_load(int cpu)
 	pcpu->time_in_idle = now_idle;
 	pcpu->time_in_idle_timestamp = now;
 
-	/* Compute load since last frequency change */
-	delta_idle = (unsigned int)(now_idle - pcpu->target_set_time_in_idle);
-	delta_time = (unsigned int)(now - pcpu->target_set_time);
-	if ((delta_time == 0) || (delta_idle > delta_time))
-		pcpu->last_cpu_load = 0;
-	else
-		pcpu->last_cpu_load = 100 * (delta_time - delta_idle) / delta_time;
-
 	return now;
 }
 
@@ -244,7 +238,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 * Skip load calculation and frequency logic for this CPU
 	 * if it is offline.
 	 */
-	if (!cpu_online(data))
+	if (data > 0 && !cpu_online(data))
 		goto call_hp_work;
 
 	spin_lock(&pcpu->load_lock);
@@ -259,6 +253,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	do_div(cputime_speedadj, delta_time);
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
 	cpu_load = loadadjfreq / pcpu->target_freq;
+	pcpu->last_cpu_load = cpu_load;
 	boosted = boost_val || now < boostpulse_endtime;
 
 	if (cpu_load >= curr_go_hispeed_load || boosted) {
@@ -355,22 +350,31 @@ call_hp_work:
 		}
 		avg_load = total_load / num_online_cpus();
 
-		/*
-		 * Reset/Increment nr_periods we've been
-		 * here based on load.
-		 */
-		if (avg_load <= unplug_load[data - 1]) {
-			pcpu->nr_periods_add = 0;
-			pcpu->nr_periods_remove++;
-		} else if (avg_load > unplug_load[data - 1]) {
-			pcpu->nr_periods_remove = 0;
-			pcpu->nr_periods_add++;
-		}
+		/* Increment nr_periods_add/remove and load */
+		pcpu->nr_periods_add++;
+		pcpu->nr_periods_remove++;
+		pcpu->add_avg_load+=avg_load;
+		pcpu->remove_avg_load+=avg_load;
 
-		if (pcpu->nr_periods_add > curr_hot_add_sampling_periods)
-			call_hp_add = 1;
-		else if (pcpu->nr_periods_remove > curr_hot_remove_sampling_periods)
-			call_hp_remove = 1;
+		/*
+		 * If we've been here for at least hot_add/remove
+		 * sampling periods reset load+period counter and
+		 * compare average load to unplug_load. If it exceeds
+		 * add the CPU, if it is lower than remove the CPU.
+		 */
+		if (pcpu->nr_periods_add >= curr_hot_add_sampling_periods) {
+			if (pcpu->add_avg_load / pcpu->nr_periods_add
+			    > unplug_load[data - 1])
+				call_hp_add = 1;
+			pcpu->add_avg_load = 0;
+			pcpu->nr_periods_add = 0;
+		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
+			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
+			    <= unplug_load[data - 1])
+				call_hp_remove = 1;
+			pcpu->remove_avg_load = 0;
+			pcpu->nr_periods_remove = 0;
+		}
 
 		if (call_hp_add) {
 			spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
@@ -1167,6 +1171,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 				pcpu->target_set_time;
 			pcpu->nr_periods_add = 0;
 			pcpu->nr_periods_remove = 0;
+			pcpu->add_avg_load = 0;
+			pcpu->remove_avg_load =  0;
 			pcpu->last_cpu_load = 0;
 			down_write(&pcpu->enable_sem);
 			expires = jiffies + usecs_to_jiffies(curr_timer_rate);

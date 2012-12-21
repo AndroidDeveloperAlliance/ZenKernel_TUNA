@@ -223,8 +223,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int index;
 	unsigned int total_load = 0;
 	unsigned int rearm_if_notmax = 0;
-	unsigned int call_hp_add = 0;
-	unsigned int call_hp_remove = 0;
 	unsigned long flags;
 	bool boosted;
 
@@ -364,28 +362,30 @@ call_hp_work:
 		 */
 		if (pcpu->nr_periods_add >= curr_hot_add_sampling_periods) {
 			if (pcpu->add_avg_load / pcpu->nr_periods_add
-			    > unplug_load[data - 1])
-				call_hp_add = 1;
+			    > unplug_load[data - 1]) {
+				spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
+				cpumask_set_cpu(data, &hotplug_add_cpumask);
+				spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
+				queue_work(hotplug_add_wq, &hotplug_add_work);
+			}
+			/* Reset remove and add load/period counters */
 			pcpu->add_avg_load = 0;
 			pcpu->nr_periods_add = 0;
-		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
-			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
-			    <= unplug_load[data - 1])
-				call_hp_remove = 1;
 			pcpu->remove_avg_load = 0;
 			pcpu->nr_periods_remove = 0;
-		}
-
-		if (call_hp_add) {
-			spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
-			cpumask_set_cpu(data, &hotplug_add_cpumask);
-			spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
-			queue_work(hotplug_add_wq, &hotplug_add_work);
-		} else if (call_hp_remove) {
-			spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
-			cpumask_set_cpu(data, &hotplug_remove_cpumask);
-			spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
-			queue_work(hotplug_remove_wq, &hotplug_remove_work);
+		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
+			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
+			    <= unplug_load[data - 1]) {
+				spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
+				cpumask_set_cpu(data, &hotplug_remove_cpumask);
+				spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
+				queue_work(hotplug_remove_wq, &hotplug_remove_work);
+			}
+			/* Reset remove and add load/period counters */
+			pcpu->add_avg_load = 0;
+			pcpu->nr_periods_add = 0;
+			pcpu->remove_avg_load = 0;
+			pcpu->nr_periods_remove = 0;
 		}
 	}
 

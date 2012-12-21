@@ -1350,20 +1350,20 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 				pcpu->target_set_time;
 			pcpu->hispeed_validate_time =
 				pcpu->target_set_time;
-			pcpu->governor_enabled = 1;
 			pcpu->nr_periods_add = 0;
 			pcpu->nr_periods_remove = 0;
 			pcpu->last_cpu_load = 0;
-			smp_wmb();
+			down_write(&pcpu->enable_sem);
 			expires = jiffies + usecs_to_jiffies(curr_timer_rate);
 			pcpu->cpu_timer.expires = expires;
 			add_timer_on(&pcpu->cpu_timer, j);
-
 			if (timer_slack_val >= 0) {
 				expires += usecs_to_jiffies(timer_slack_val);
 				pcpu->cpu_slack_timer.expires = expires;
 				add_timer_on(&pcpu->cpu_slack_timer, j);
 			}
+			pcpu->governor_enabled = 1;
+			up_write(&pcpu->enable_sem);
 		}
 
 		/*

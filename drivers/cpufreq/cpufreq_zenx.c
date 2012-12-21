@@ -30,6 +30,7 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
+#include <linux/earlysuspend.h>
 #include <linux/slab.h>
 
 #include <asm/cputime.h>
@@ -56,6 +57,7 @@ struct cpufreq_zenx_cpuinfo {
 	unsigned int last_cpu_load;
 	unsigned int nr_periods_add;
 	unsigned int nr_periods_remove;
+	unsigned int nr_periods_pulsed;
 	u64 floor_validate_time;
 	u64 hispeed_validate_time;
 	struct rw_semaphore enable_sem;
@@ -85,7 +87,10 @@ static unsigned int hispeed_freq;
 
 /* Go to hi speed when CPU load at or above this value. */
 #define DEFAULT_GO_HISPEED_LOAD 85
+#define DEFAULT_GO_HISPEED_LOAD_SUSPENDED 100
+static unsigned long curr_go_hispeed_load;
 static unsigned long go_hispeed_load;
+static unsigned long go_hispeed_load_suspended;
 
 /* Unplug auxillary CPUs below these values. */
 #define DEFAULT_UNPLUG_LOAD_CPU1 35
@@ -95,7 +100,7 @@ static unsigned long go_hispeed_load;
 static unsigned int unplug_load[7];
 
 /* Target load.  Lower values result in higher CPU speeds. */
-#define DEFAULT_TARGET_LOAD 90
+#define DEFAULT_TARGET_LOAD 100
 static unsigned int default_target_loads[] = {DEFAULT_TARGET_LOAD};
 static spinlock_t target_loads_lock;
 static unsigned int *target_loads = default_target_loads;
@@ -106,26 +111,35 @@ static int ntarget_loads = ARRAY_SIZE(default_target_loads);
  * CPU load must be below unplug_load for this many periods.
  */
 #define DEFAULT_NR_REMOVE_PERIODS (75)
+#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (40)
+static unsigned int curr_hot_remove_sampling_periods;
 static unsigned int hot_remove_sampling_periods;
+static unsigned int hot_remove_sampling_periods_suspended;
 
 /*
  * How many sampling periods must pass before we hot-add a CPU.
  * CPU load must be above unplug_load for this many periods.
  */
 #define DEFAULT_NR_ADD_PERIODS (20)
+#define DEFAULT_NR_ADD_PERIODS_SUSPENDED (35)
+static unsigned int curr_hot_add_sampling_periods;
 static unsigned int hot_add_sampling_periods;
+static unsigned int hot_add_sampling_periods_suspended;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
  */
-#define DEFAULT_MIN_SAMPLE_TIME (80 * USEC_PER_MSEC)
+#define DEFAULT_MIN_SAMPLE_TIME (40 * USEC_PER_MSEC)
 static unsigned long min_sample_time;
 
 /*
  * The sample rate of the timer used to increase frequency
  */
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
+#define DEFAULT_TIMER_RATE_SUSPENDED (30 * USEC_PER_MSEC)
+static unsigned long curr_timer_rate;
 static unsigned long timer_rate;
+static unsigned long timer_rate_suspended;
 
 /*
  * Wait this long before raising speed above hispeed, by default a single
@@ -164,7 +178,7 @@ struct cpufreq_governor cpufreq_gov_zenx = {
 static void cpufreq_zenx_timer_resched(
 	struct cpufreq_zenx_cpuinfo *pcpu)
 {
-	unsigned long expires = jiffies + usecs_to_jiffies(timer_rate);
+	unsigned long expires = jiffies + usecs_to_jiffies(curr_timer_rate);
 
 	mod_timer_pinned(&pcpu->cpu_timer, expires);
 	if (timer_slack_val >= 0 && pcpu->target_freq > pcpu->policy->min) {
@@ -357,7 +371,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	cpu_load = loadadjfreq / pcpu->target_freq;
 	boosted = boost_val || now < boostpulse_endtime;
 
-	if (cpu_load >= go_hispeed_load || boosted) {
+	if (cpu_load >= curr_go_hispeed_load || boosted) {
 		if (pcpu->target_freq < hispeed_freq) {
 			new_freq = hispeed_freq;
 		} else {
@@ -463,9 +477,9 @@ call_hp_work:
 			pcpu->nr_periods_add++;
 		}
 
-		if (pcpu->nr_periods_add > hot_add_sampling_periods)
+		if (pcpu->nr_periods_add > curr_hot_add_sampling_periods)
 			call_hp_add = 1;
-		else if (pcpu->nr_periods_remove > hot_remove_sampling_periods)
+		else if (pcpu->nr_periods_remove > curr_hot_remove_sampling_periods)
 			call_hp_remove = 1;
 
 		if (call_hp_add) {
@@ -865,6 +879,28 @@ static ssize_t store_go_hispeed_load(struct kobject *kobj,
 static struct global_attr go_hispeed_load_attr = __ATTR(go_hispeed_load, 0644,
 		show_go_hispeed_load, store_go_hispeed_load);
 
+static ssize_t show_go_hispeed_load_suspended(struct kobject *kobj,
+				     struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", go_hispeed_load_suspended);
+}
+
+static ssize_t store_go_hispeed_load_suspended(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = strict_strtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	go_hispeed_load_suspended = val;
+	return count;
+}
+
+static struct global_attr go_hispeed_load_suspended_attr = __ATTR(go_hispeed_load_suspended, 0644,
+		show_go_hispeed_load_suspended, store_go_hispeed_load_suspended);
+
 static ssize_t show_unplug_load_cpu1(struct kobject *kobj,
 				     struct attribute *attr, char *buf)
 {
@@ -953,6 +989,28 @@ static ssize_t store_hot_remove_sampling_periods(struct kobject *kobj,
 static struct global_attr hot_remove_sampling_periods_attr = __ATTR(hot_remove_sampling_periods, 0644,
 		show_hot_remove_sampling_periods, store_hot_remove_sampling_periods);
 
+static ssize_t show_hot_remove_sampling_periods_suspended(struct kobject *kobj,
+				struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", hot_remove_sampling_periods_suspended);
+}
+
+static ssize_t store_hot_remove_sampling_periods_suspended(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	unsigned int val;
+
+	ret = sscanf(buf, "%u\n", &val);
+	if (ret < 0)
+		return ret;
+	hot_remove_sampling_periods_suspended = val;
+	return count;
+}
+
+static struct global_attr hot_remove_sampling_periods_suspended_attr = __ATTR(hot_remove_sampling_periods_suspended, 0644,
+		show_hot_remove_sampling_periods_suspended, store_hot_remove_sampling_periods_suspended);
+
 static ssize_t show_hot_add_sampling_periods(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
@@ -974,6 +1032,28 @@ static ssize_t store_hot_add_sampling_periods(struct kobject *kobj,
 
 static struct global_attr hot_add_sampling_periods_attr = __ATTR(hot_add_sampling_periods, 0644,
 		show_hot_add_sampling_periods, store_hot_add_sampling_periods);
+
+static ssize_t show_hot_add_sampling_periods_suspended(struct kobject *kobj,
+				struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", hot_add_sampling_periods_suspended);
+}
+
+static ssize_t store_hot_add_sampling_periods_suspended(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	unsigned int val;
+
+	ret = sscanf(buf, "%u\n", &val);
+	if (ret < 0)
+		return ret;
+	hot_add_sampling_periods_suspended = val;
+	return count;
+}
+
+static struct global_attr hot_add_sampling_periods_suspended_attr = __ATTR(hot_add_sampling_periods_suspended, 0644,
+		show_hot_add_sampling_periods_suspended, store_hot_add_sampling_periods_suspended);
 
 static ssize_t show_min_sample_time(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -1040,6 +1120,28 @@ static ssize_t store_timer_rate(struct kobject *kobj,
 
 static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 		show_timer_rate, store_timer_rate);
+
+static ssize_t show_timer_rate_suspended(struct kobject *kobj,
+			struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%lu\n", timer_rate_suspended);
+}
+
+static ssize_t store_timer_rate_suspended(struct kobject *kobj,
+			struct attribute *attr, const char *buf, size_t count)
+{
+	int ret;
+	unsigned long val;
+
+	ret = strict_strtoul(buf, 0, &val);
+	if (ret < 0)
+		return ret;
+	timer_rate_suspended = val;
+	return count;
+}
+
+static struct global_attr timer_rate_suspended_attr = __ATTR(timer_rate_suspended, 0644,
+		show_timer_rate_suspended, store_timer_rate_suspended);
 
 static ssize_t show_timer_slack(
 	struct kobject *kobj, struct attribute *attr, char *buf)
@@ -1140,14 +1242,18 @@ static struct attribute *zenx_attributes[] = {
 	&target_loads_attr.attr,
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
+	&go_hispeed_load_suspended_attr.attr,
 	&above_hispeed_delay.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpumore_attr.attr,
 	&hot_remove_sampling_periods_attr.attr,
+	&hot_remove_sampling_periods_suspended_attr.attr,
 	&hot_add_sampling_periods_attr.attr,
+	&hot_add_sampling_periods_suspended_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
+	&timer_rate_suspended_attr.attr,
 	&timer_slack.attr,
 	&boost.attr,
 	&boostpulse.attr,
@@ -1159,6 +1265,37 @@ static struct attribute_group zenx_attr_group = {
 	.attrs = zenx_attributes,
 	.name = "zenx",
 };
+
+#ifdef CONFIG_EARLYSUSPEND
+static void zenx_early_suspend(struct early_suspend *handler) {
+	/*
+	 * Adjust parameters of the governor on suspend for
+	 * power savings
+	 */
+	curr_go_hispeed_load = go_hispeed_load_suspended;
+	curr_hot_remove_sampling_periods = hot_remove_sampling_periods_suspended;
+	curr_hot_add_sampling_periods = hot_add_sampling_periods_suspended;
+	curr_timer_rate = timer_rate_suspended;
+}
+
+static void zenx_late_resume(struct early_suspend *handler) {
+	/*
+	 * Adjust parameters of the governor back to defaults.
+	 * Using offsets allows us not to overwrite user values.
+	 */
+	curr_go_hispeed_load = go_hispeed_load;
+	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
+	curr_hot_add_sampling_periods = hot_add_sampling_periods;
+	curr_timer_rate = timer_rate;
+	cpufreq_zenx_boost();
+}
+
+static struct early_suspend zenx_power_suspend = {
+	.suspend = zenx_early_suspend,
+	.resume = zenx_late_resume,
+	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1,
+};
+#endif
 
 static int cpufreq_zenx_idle_notifier(struct notifier_block *nb,
 					     unsigned long val,
@@ -1218,7 +1355,7 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->nr_periods_remove = 0;
 			pcpu->last_cpu_load = 0;
 			smp_wmb();
-			expires = jiffies + usecs_to_jiffies(timer_rate);
+			expires = jiffies + usecs_to_jiffies(curr_timer_rate);
 			pcpu->cpu_timer.expires = expires;
 			add_timer_on(&pcpu->cpu_timer, j);
 
@@ -1241,6 +1378,9 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		if (rc)
 			return rc;
 
+#ifdef CONFIG_EARLYSUSPEND
+		register_early_suspend(&zenx_power_suspend);
+#endif
 		idle_notifier_register(&cpufreq_zenx_idle_nb);
 		cpufreq_register_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
@@ -1265,6 +1405,9 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		sysfs_remove_group(cpufreq_global_kobject,
 				&zenx_attr_group);
 
+#ifdef CONFIG_EARLYSUSPEND
+		unregister_early_suspend(&zenx_power_suspend);
+#endif
 		/*
 		 * XXX BIG CAVEAT: Stopping the governor with CPU1 offline
 		 * will result in it remaining offline until the user onlines
@@ -1295,6 +1438,8 @@ static int __init cpufreq_zenx_init(void)
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
 	go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
+	go_hispeed_load_suspended = DEFAULT_GO_HISPEED_LOAD_SUSPENDED;
+	curr_go_hispeed_load = go_hispeed_load;
 	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
 	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
 	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPUMORE;
@@ -1302,11 +1447,17 @@ static int __init cpufreq_zenx_init(void)
 	unplug_load[4] = unplug_load[2];
 	unplug_load[5] = unplug_load[2];
 	unplug_load[6] = unplug_load[2];
-	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS ;
-	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS ;
+	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+	hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
+	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
+	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+	hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
+	curr_hot_add_sampling_periods = hot_add_sampling_periods;
 	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 	timer_rate = DEFAULT_TIMER_RATE;
+	timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
+	curr_timer_rate = timer_rate;
 
 	/* Initalize per-cpu timers */
 	for_each_possible_cpu(i) {

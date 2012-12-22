@@ -67,6 +67,9 @@ rm -f $INITD_DIR/99lk-gpu
 rm -f $
 # Zen
 rm -f $INITD_DIR/99ZenKernel
+rm -f /system/bin/set_zen_sysctl
+rm -rf /data/zen
+
 
 # clean kernel setting app shared_prefs
 rm -rf /data/data/mobi.cyann.nstools/shared_prefs

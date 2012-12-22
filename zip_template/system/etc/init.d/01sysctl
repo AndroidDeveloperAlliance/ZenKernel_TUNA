@@ -1,0 +1,4 @@
+#!/system/bin/sh
+
+# Set sysctl
+/system/bin/set_sysctl 15 /system/etc/sysctl.conf &

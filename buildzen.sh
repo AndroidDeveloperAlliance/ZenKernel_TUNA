@@ -35,7 +35,7 @@ fi
 
 sed -i s/CONFIG_ZEN_INFO_VERSION_CODE=.*/CONFIG_ZEN_INFO_VERSION_CODE=${2}/ .config
 
-ARCH=arm CROSS_COMPILE=${1} make -j2
+ARCH=arm CROSS_COMPILE=${1} make -j4
 
 if [[ $? -ne 0 ]] ; then
 	echo "Kernel build failed"

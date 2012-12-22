@@ -6,7 +6,7 @@ cd ramdisk
 # If init.rc contains 'init.d' it probably already runs init scripts from there
 if [ -z `/tmp/busybox grep init.d init.rc` ]; then
 	echo '' >> init.rc
-	echo 'service run_parts /system/sbin/bb/busybox run-parts /system/etc/init.d' >> init.rc
+	echo 'service run_parts /system/xbin/bb/busybox run-parts /system/etc/init.d' >> init.rc
 	echo '    class main' >> init.rc
 	echo '    oneshot' >> init.rc
 fi

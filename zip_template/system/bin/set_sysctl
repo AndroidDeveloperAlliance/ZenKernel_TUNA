@@ -1,0 +1,3 @@
+#!/system/xbin/bb/busybox sh
+/system/xbin/bb/busybox sleep {1}
+/system/xbin/bb/busybox sysctl -p {2}

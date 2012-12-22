@@ -87,18 +87,30 @@ static spinlock_t hotplug_remove_cpumask_lock;
 static unsigned int hispeed_freq;
 
 /* Go to hi speed when CPU load at or above this value. */
-#define DEFAULT_GO_HISPEED_LOAD 85
-#define DEFAULT_GO_HISPEED_LOAD_SUSPENDED 100
-static unsigned long curr_go_hispeed_load;
-static unsigned long go_hispeed_load;
-static unsigned long go_hispeed_load_suspended;
+#define DEFAULT_GO_HISPEED_LOAD 99
+static unsigned long go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
 
 /* Unplug auxillary CPUs below these values. */
 #define DEFAULT_UNPLUG_LOAD_CPU1 35
 #define DEFAULT_UNPLUG_LOAD_CPU2 50
 #define DEFAULT_UNPLUG_LOAD_CPUMORE 50
 
-static unsigned int unplug_load[7];
+static unsigned int unplug_load[] =
+	{ DEFAULT_UNPLUG_LOAD_CPU1,
+	  DEFAULT_UNPLUG_LOAD_CPU2,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE
+	};
+
+/* Target load.  Lower values result in higher CPU speeds. */
+#define DEFAULT_TARGET_LOAD 90
+static unsigned int default_target_loads[] = {DEFAULT_TARGET_LOAD};
+static spinlock_t target_loads_lock;
+static unsigned int *target_loads = default_target_loads;
+static int ntarget_loads = ARRAY_SIZE(default_target_loads);
 
 /*
  * Number of sampling periods to take average CPU load across
@@ -106,9 +118,9 @@ static unsigned int unplug_load[7];
  */
 #define DEFAULT_NR_REMOVE_PERIODS (100)
 #define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (50)
-static unsigned int curr_hot_remove_sampling_periods;
-static unsigned int hot_remove_sampling_periods;
-static unsigned int hot_remove_sampling_periods_suspended;
+static unsigned int curr_hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+static unsigned int hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+static unsigned int hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
 
 /*
  * Number of sampling periods to take average CPU load across
@@ -116,31 +128,31 @@ static unsigned int hot_remove_sampling_periods_suspended;
  */
 #define DEFAULT_NR_ADD_PERIODS (30)
 #define DEFAULT_NR_ADD_PERIODS_SUSPENDED (100)
-static unsigned int curr_hot_add_sampling_periods;
-static unsigned int hot_add_sampling_periods;
-static unsigned int hot_add_sampling_periods_suspended;
+static unsigned int curr_hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+static unsigned int hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+static unsigned int hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
  */
 #define DEFAULT_MIN_SAMPLE_TIME (40 * USEC_PER_MSEC)
-static unsigned long min_sample_time;
+static unsigned long min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 
 /*
  * The sample rate of the timer used to increase frequency
  */
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
 #define DEFAULT_TIMER_RATE_SUSPENDED (30 * USEC_PER_MSEC)
-static unsigned long curr_timer_rate;
-static unsigned long timer_rate;
-static unsigned long timer_rate_suspended;
+static unsigned long curr_timer_rate = DEFAULT_TIMER_RATE;
+static unsigned long timer_rate = DEFAULT_TIMER_RATE;
+static unsigned long timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
 
 /*
  * Wait this long before raising speed above hispeed, by default a single
  * timer interval.
  */
 #define DEFAULT_ABOVE_HISPEED_DELAY DEFAULT_TIMER_RATE
-static unsigned long above_hispeed_delay_val;
+static unsigned long above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 
 /* Non-zero means indefinite speed boost active */
 static int boost_val;
@@ -187,6 +199,108 @@ static void cpufreq_zenx_timer_resched(
 	pcpu->cputime_speedadj = 0;
 	pcpu->cputime_speedadj_timestamp = pcpu->time_in_idle_timestamp;
 	spin_unlock(&pcpu->load_lock);
+}
+
+static unsigned int freq_to_targetload(unsigned int freq)
+{
+	int i;
+	unsigned int ret;
+
+	spin_lock(&target_loads_lock);
+
+	for (i = 0; i < ntarget_loads - 1 && freq >= target_loads[i+1]; i += 2)
+		;
+
+	ret = target_loads[i];
+	spin_unlock(&target_loads_lock);
+	return ret;
+}
+
+/*
+ * If increasing frequencies never map to a lower target load then
+ * choose_freq() will find the minimum frequency that does not exceed its
+ * target load given the current load.
+ */
+
+static unsigned int choose_freq(
+	struct cpufreq_zenx_cpuinfo *pcpu, unsigned int loadadjfreq)
+{
+	unsigned int freq = pcpu->policy->cur;
+	unsigned int prevfreq, freqmin, freqmax;
+	unsigned int tl;
+	int index;
+	freqmin = 0;
+	freqmax = UINT_MAX;
+
+	do {
+		prevfreq = freq;
+		tl = freq_to_targetload(freq);
+
+		/*
+		 * Find the lowest frequency where the computed load is less
+		 * than or equal to the target load.
+		 */
+
+		cpufreq_frequency_table_target(
+			pcpu->policy, pcpu->freq_table, loadadjfreq / tl,
+			CPUFREQ_RELATION_L, &index);
+		freq = pcpu->freq_table[index].frequency;
+
+		if (freq > prevfreq) {
+			/* The previous frequency is too low. */
+			freqmin = prevfreq;
+
+			if (freq >= freqmax) {
+				/*
+				 * Find the highest frequency that is less
+				 * than freqmax.
+				 */
+				cpufreq_frequency_table_target(
+					pcpu->policy, pcpu->freq_table,
+					freqmax - 1, CPUFREQ_RELATION_H,
+					&index);
+				freq = pcpu->freq_table[index].frequency;
+
+				if (freq == freqmin) {
+					/*
+					 * The first frequency below freqmax
+					 * has already been found to be too
+					 * low.  freqmax is the lowest speed
+					 * we found that is fast enough.
+					 */
+					freq = freqmax;
+					break;
+				}
+			}
+		} else if (freq < prevfreq) {
+			/* The previous frequency is high enough. */
+			freqmax = prevfreq;
+
+			if (freq <= freqmin) {
+				/*
+				 * Find the lowest frequency that is higher
+				 * than freqmin.
+				 */
+				cpufreq_frequency_table_target(
+					pcpu->policy, pcpu->freq_table,
+					freqmin + 1, CPUFREQ_RELATION_L,
+					&index);
+				freq = pcpu->freq_table[index].frequency;
+
+				/*
+				 * If freqmax is the first frequency above
+				 * freqmin then we have already found that
+				 * this speed is fast enough.
+				 */
+				if (freq == freqmax)
+					break;
+			}
+		}
+
+		/* If same frequency chosen as previous then done. */
+	} while (freq != prevfreq);
+
+	return freq;
 }
 
 static u64 update_load(int cpu)
@@ -254,17 +368,17 @@ static void cpufreq_zenx_timer(unsigned long data)
 	pcpu->last_cpu_load = cpu_load;
 	boosted = boost_val || now < boostpulse_endtime;
 
-	if (cpu_load >= curr_go_hispeed_load || boosted) {
+	if (cpu_load >= go_hispeed_load || boosted) {
 		if (pcpu->target_freq < hispeed_freq) {
 			new_freq = hispeed_freq;
 		} else {
-			new_freq = pcpu->policy->max * cpu_load / 100;
+			new_freq = choose_freq(pcpu, loadadjfreq);
 
 			if (new_freq < hispeed_freq)
 				new_freq = hispeed_freq;
 		}
 	} else {
-		new_freq = pcpu->policy->max * cpu_load / 100;
+		new_freq = choose_freq(pcpu, loadadjfreq);
 	}
 
 	if (pcpu->target_freq >= hispeed_freq &&
@@ -367,12 +481,13 @@ call_hp_work:
 				cpumask_set_cpu(data, &hotplug_add_cpumask);
 				spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
 				queue_work(hotplug_add_wq, &hotplug_add_work);
+				/* Reset remove counters so we don't instantly do more work. */
+				pcpu->remove_avg_load = 0;
+				pcpu->nr_periods_remove = 0;
 			}
-			/* Reset remove and add load/period counters */
+			/* Reset add period counters */
 			pcpu->add_avg_load = 0;
 			pcpu->nr_periods_add = 0;
-			pcpu->remove_avg_load = 0;
-			pcpu->nr_periods_remove = 0;
 		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
 			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
 			    <= unplug_load[data - 1]) {
@@ -380,10 +495,11 @@ call_hp_work:
 				cpumask_set_cpu(data, &hotplug_remove_cpumask);
 				spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
 				queue_work(hotplug_remove_wq, &hotplug_remove_work);
+				/* Reset add counters so we don't instantly do more work. */
+				pcpu->add_avg_load = 0;
+				pcpu->nr_periods_add = 0;
 			}
-			/* Reset remove and add load/period counters */
-			pcpu->add_avg_load = 0;
-			pcpu->nr_periods_add = 0;
+			/* Reset remove period counters */
 			pcpu->remove_avg_load = 0;
 			pcpu->nr_periods_remove = 0;
 		}
@@ -653,6 +769,80 @@ static struct notifier_block cpufreq_notifier_block = {
 	.notifier_call = cpufreq_zenx_notifier,
 };
 
+static ssize_t show_target_loads(
+	struct kobject *kobj, struct attribute *attr, char *buf)
+{
+	int i;
+	ssize_t ret = 0;
+
+	spin_lock(&target_loads_lock);
+
+	for (i = 0; i < ntarget_loads; i++)
+		ret += sprintf(buf + ret, "%u%s", target_loads[i],
+			       i & 0x1 ? ":" : " ");
+
+	ret += sprintf(buf + ret, "\n");
+	spin_unlock(&target_loads_lock);
+	return ret;
+}
+
+static ssize_t store_target_loads(
+	struct kobject *kobj, struct attribute *attr, const char *buf,
+	size_t count)
+{
+	int ret;
+	const char *cp;
+	unsigned int *new_target_loads = NULL;
+	int ntokens = 1;
+	int i;
+
+	cp = buf;
+	while ((cp = strpbrk(cp + 1, " :")))
+		ntokens++;
+
+	if (!(ntokens & 0x1))
+		goto err_inval;
+
+	new_target_loads = kmalloc(ntokens * sizeof(unsigned int), GFP_KERNEL);
+	if (!new_target_loads) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	cp = buf;
+	i = 0;
+	while (i < ntokens) {
+		if (sscanf(cp, "%u", &new_target_loads[i++]) != 1)
+			goto err_inval;
+
+		cp = strpbrk(cp, " :");
+		if (!cp)
+			break;
+		cp++;
+	}
+
+	if (i != ntokens)
+		goto err_inval;
+
+	spin_lock(&target_loads_lock);
+	if (target_loads != default_target_loads)
+		kfree(target_loads);
+	target_loads = new_target_loads;
+	ntarget_loads = ntokens;
+	spin_unlock(&target_loads_lock);
+	return count;
+
+err_inval:
+	ret = -EINVAL;
+err:
+	kfree(new_target_loads);
+	return ret;
+}
+
+static struct global_attr target_loads_attr =
+	__ATTR(target_loads, S_IRUGO | S_IWUSR,
+		show_target_loads, store_target_loads);
+
 static ssize_t show_hispeed_freq(struct kobject *kobj,
 				 struct attribute *attr, char *buf)
 {
@@ -698,28 +888,6 @@ static ssize_t store_go_hispeed_load(struct kobject *kobj,
 
 static struct global_attr go_hispeed_load_attr = __ATTR(go_hispeed_load, 0644,
 		show_go_hispeed_load, store_go_hispeed_load);
-
-static ssize_t show_go_hispeed_load_suspended(struct kobject *kobj,
-				     struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%lu\n", go_hispeed_load_suspended);
-}
-
-static ssize_t store_go_hispeed_load_suspended(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned long val;
-
-	ret = strict_strtoul(buf, 0, &val);
-	if (ret < 0)
-		return ret;
-	go_hispeed_load_suspended = val;
-	return count;
-}
-
-static struct global_attr go_hispeed_load_suspended_attr = __ATTR(go_hispeed_load_suspended, 0644,
-		show_go_hispeed_load_suspended, store_go_hispeed_load_suspended);
 
 static ssize_t show_unplug_load_cpu1(struct kobject *kobj,
 				     struct attribute *attr, char *buf)
@@ -1059,9 +1227,9 @@ static ssize_t store_boostpulse_duration(
 define_one_global_rw(boostpulse_duration);
 
 static struct attribute *zenx_attributes[] = {
+	&target_loads_attr.attr,
 	&hispeed_freq_attr.attr,
 	&go_hispeed_load_attr.attr,
-	&go_hispeed_load_suspended_attr.attr,
 	&above_hispeed_delay.attr,
 	&unplug_load_cpu1_attr.attr,
 	&unplug_load_cpu2_attr.attr,
@@ -1091,7 +1259,6 @@ static void zenx_early_suspend(struct early_suspend *handler) {
 	 * Adjust parameters of the governor on suspend for
 	 * power savings
 	 */
-	curr_go_hispeed_load = go_hispeed_load_suspended;
 	curr_hot_remove_sampling_periods = hot_remove_sampling_periods_suspended;
 	curr_hot_add_sampling_periods = hot_add_sampling_periods_suspended;
 	curr_timer_rate = timer_rate_suspended;
@@ -1102,7 +1269,6 @@ static void zenx_late_resume(struct early_suspend *handler) {
 	 * Adjust parameters of the governor back to defaults.
 	 * Using offsets allows us not to overwrite user values.
 	 */
-	curr_go_hispeed_load = go_hispeed_load;
 	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
 	curr_hot_add_sampling_periods = hot_add_sampling_periods;
 	curr_timer_rate = timer_rate;
@@ -1258,28 +1424,6 @@ static int __init cpufreq_zenx_init(void)
 	struct cpufreq_zenx_cpuinfo *pcpu;
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
-	go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
-	go_hispeed_load_suspended = DEFAULT_GO_HISPEED_LOAD_SUSPENDED;
-	curr_go_hispeed_load = go_hispeed_load;
-	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
-	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
-	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPUMORE;
-	unplug_load[3] = unplug_load[2];
-	unplug_load[4] = unplug_load[2];
-	unplug_load[5] = unplug_load[2];
-	unplug_load[6] = unplug_load[2];
-	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
-	hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
-	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
-	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
-	hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
-	curr_hot_add_sampling_periods = hot_add_sampling_periods;
-	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
-	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
-	timer_rate = DEFAULT_TIMER_RATE;
-	timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
-	curr_timer_rate = timer_rate;
-
 	/* Initalize per-cpu timers */
 	for_each_possible_cpu(i) {
 		pcpu = &per_cpu(cpuinfo, i);
@@ -1292,6 +1436,7 @@ static int __init cpufreq_zenx_init(void)
 		init_rwsem(&pcpu->enable_sem);
 	}
 
+	spin_lock_init(&target_loads_lock);
 	spin_lock_init(&speedchange_cpumask_lock);
 	mutex_init(&set_speed_lock);
 

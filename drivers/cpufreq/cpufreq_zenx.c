@@ -718,7 +718,7 @@ static void cpufreq_zenx_boost(void)
 			pcpu->target_freq = hispeed_freq;
 			cpumask_set_cpu(i, &speedchange_cpumask);
 			pcpu->hispeed_validate_time =
-				ktime_to_us(ktime_get())
+				ktime_to_us(ktime_get());
 			anyboost = 1;
 		}
 

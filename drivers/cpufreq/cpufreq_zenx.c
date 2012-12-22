@@ -89,16 +89,24 @@ static unsigned int hispeed_freq;
 /* Go to hi speed when CPU load at or above this value. */
 #define DEFAULT_GO_HISPEED_LOAD 85
 #define DEFAULT_GO_HISPEED_LOAD_SUSPENDED 100
-static unsigned long curr_go_hispeed_load;
-static unsigned long go_hispeed_load;
-static unsigned long go_hispeed_load_suspended;
+static unsigned long curr_go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
+static unsigned long go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
+static unsigned long go_hispeed_load_suspended = DEFAULT_GO_HISPEED_LOAD_SUSPENDED;
 
 /* Unplug auxillary CPUs below these values. */
 #define DEFAULT_UNPLUG_LOAD_CPU1 35
 #define DEFAULT_UNPLUG_LOAD_CPU2 50
 #define DEFAULT_UNPLUG_LOAD_CPUMORE 50
 
-static unsigned int unplug_load[7];
+static unsigned int unplug_load[] = 
+	{ DEFAULT_UNPLUG_LOAD_CPU1, 
+	  DEFAULT_UNPLUG_LOAD_CPU2,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE,
+	  DEFAULT_UNPLUG_LOAD_CPUMORE
+	};
 
 /*
  * Number of sampling periods to take average CPU load across
@@ -106,9 +114,9 @@ static unsigned int unplug_load[7];
  */
 #define DEFAULT_NR_REMOVE_PERIODS (100)
 #define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (50)
-static unsigned int curr_hot_remove_sampling_periods;
-static unsigned int hot_remove_sampling_periods;
-static unsigned int hot_remove_sampling_periods_suspended;
+static unsigned int curr_hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+static unsigned int hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+static unsigned int hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
 
 /*
  * Number of sampling periods to take average CPU load across
@@ -116,31 +124,31 @@ static unsigned int hot_remove_sampling_periods_suspended;
  */
 #define DEFAULT_NR_ADD_PERIODS (30)
 #define DEFAULT_NR_ADD_PERIODS_SUSPENDED (100)
-static unsigned int curr_hot_add_sampling_periods;
-static unsigned int hot_add_sampling_periods;
-static unsigned int hot_add_sampling_periods_suspended;
+static unsigned int curr_hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+static unsigned int hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+static unsigned int hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
  */
 #define DEFAULT_MIN_SAMPLE_TIME (40 * USEC_PER_MSEC)
-static unsigned long min_sample_time;
+static unsigned long min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
 
 /*
  * The sample rate of the timer used to increase frequency
  */
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
 #define DEFAULT_TIMER_RATE_SUSPENDED (30 * USEC_PER_MSEC)
-static unsigned long curr_timer_rate;
-static unsigned long timer_rate;
-static unsigned long timer_rate_suspended;
+static unsigned long curr_timer_rate = DEFAULT_TIMER_RATE;
+static unsigned long timer_rate = DEFAULT_TIMER_RATE;
+static unsigned long timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
 
 /*
  * Wait this long before raising speed above hispeed, by default a single
  * timer interval.
  */
 #define DEFAULT_ABOVE_HISPEED_DELAY DEFAULT_TIMER_RATE
-static unsigned long above_hispeed_delay_val;
+static unsigned long above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
 
 /* Non-zero means indefinite speed boost active */
 static int boost_val;
@@ -1259,28 +1267,6 @@ static int __init cpufreq_zenx_init(void)
 	unsigned int i;
 	struct cpufreq_zenx_cpuinfo *pcpu;
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
-
-	go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
-	go_hispeed_load_suspended = DEFAULT_GO_HISPEED_LOAD_SUSPENDED;
-	curr_go_hispeed_load = go_hispeed_load;
-	unplug_load[0] = DEFAULT_UNPLUG_LOAD_CPU1;
-	unplug_load[1] = DEFAULT_UNPLUG_LOAD_CPU2;
-	unplug_load[2] = DEFAULT_UNPLUG_LOAD_CPUMORE;
-	unplug_load[3] = unplug_load[2];
-	unplug_load[4] = unplug_load[2];
-	unplug_load[5] = unplug_load[2];
-	unplug_load[6] = unplug_load[2];
-	hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
-	hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
-	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
-	hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
-	hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
-	curr_hot_add_sampling_periods = hot_add_sampling_periods;
-	min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
-	above_hispeed_delay_val = DEFAULT_ABOVE_HISPEED_DELAY;
-	timer_rate = DEFAULT_TIMER_RATE;
-	timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
-	curr_timer_rate = timer_rate;
 
 	/* Initalize per-cpu timers */
 	for_each_possible_cpu(i) {

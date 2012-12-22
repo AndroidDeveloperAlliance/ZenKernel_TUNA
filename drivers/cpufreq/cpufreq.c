@@ -1608,8 +1608,7 @@ static int __cpufreq_set_policy(struct cpufreq_policy *data,
 	int i = 0, ret = 0, min = 0, max = 0;
 	unsigned long available_frequencies[] =
 	{
-		192000,
-		230400,
+		218880,
 		384000,
 		576000,
 		729600,

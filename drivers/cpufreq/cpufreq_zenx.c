@@ -367,12 +367,13 @@ call_hp_work:
 				cpumask_set_cpu(data, &hotplug_add_cpumask);
 				spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
 				queue_work(hotplug_add_wq, &hotplug_add_work);
+				/* Reset remove counters so we don't instantly do more work. */
+				pcpu->remove_avg_load = 0;
+				pcpu->nr_periods_remove = 0;
 			}
-			/* Reset remove and add load/period counters */
+			/* Reset add period counters */
 			pcpu->add_avg_load = 0;
 			pcpu->nr_periods_add = 0;
-			pcpu->remove_avg_load = 0;
-			pcpu->nr_periods_remove = 0;
 		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
 			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
 			    <= unplug_load[data - 1]) {
@@ -380,10 +381,11 @@ call_hp_work:
 				cpumask_set_cpu(data, &hotplug_remove_cpumask);
 				spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
 				queue_work(hotplug_remove_wq, &hotplug_remove_work);
+				/* Reset add counters so we don't instantly do more work. */
+				pcpu->add_avg_load = 0;
+				pcpu->nr_periods_add = 0;
 			}
-			/* Reset remove and add load/period counters */
-			pcpu->add_avg_load = 0;
-			pcpu->nr_periods_add = 0;
+			/* Reset remove period counters */
 			pcpu->remove_avg_load = 0;
 			pcpu->nr_periods_remove = 0;
 		}

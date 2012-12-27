@@ -17,7 +17,7 @@
 #define VIOS_SCALE (1 << VIOS_SCALE_SHIFT)
 
 #define VIOS_READ_SCALE (1)
-#define VIOS_WRITE_SCALE (1)
+#define VIOS_WRITE_SCALE (2)
 #define VIOS_SYNC_SCALE (2)
 #define VIOS_ASYNC_SCALE (5)
 

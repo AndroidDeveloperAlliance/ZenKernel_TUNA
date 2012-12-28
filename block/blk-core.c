@@ -1116,7 +1116,7 @@ void blk_insert_request(struct request_queue *q, struct request *rq,
 
 	add_acct_request(q, rq, where);
 	if (where == ELEVATOR_INSERT_FLUSH)
-		__blk_run_queue(q)
+		__blk_run_queue(q);
 	spin_unlock_irqrestore(q->queue_lock, flags);
 }
 EXPORT_SYMBOL(blk_insert_request);

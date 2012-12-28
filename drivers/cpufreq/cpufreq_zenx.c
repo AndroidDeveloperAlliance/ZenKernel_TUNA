@@ -35,9 +35,6 @@
 
 #include <asm/cputime.h>
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/cpufreq_zenx.h>
-
 static atomic_t active_count = ATOMIC_INIT(0);
 
 struct cpufreq_zenx_cpuinfo {
@@ -378,9 +375,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
 	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
-		trace_cpufreq_zenx_notyet(
-			data, cpu_load, pcpu->target_freq,
-			pcpu->policy->cur, new_freq);
 		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
@@ -404,9 +398,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 */
 	if (new_freq < pcpu->floor_freq) {
 		if (now - pcpu->floor_validate_time < min_sample_time) {
-			trace_cpufreq_zenx_notyet(
-				data, cpu_load, pcpu->target_freq,
-				pcpu->policy->cur, new_freq);
 			goto call_hp_work;
 		}
 	}
@@ -425,15 +416,9 @@ static void cpufreq_zenx_timer(unsigned long data)
 	}
 
 	if (pcpu->target_freq == new_freq) {
-		trace_cpufreq_zenx_already(
-			data, cpu_load, pcpu->target_freq,
-			pcpu->policy->cur, new_freq);
 		rearm_if_notmax = 1;
 		goto call_hp_work;
 	}
-
-	trace_cpufreq_zenx_target(data, cpu_load, pcpu->target_freq,
-					 pcpu->policy->cur, new_freq);
 
 	pcpu->target_freq = new_freq;
 	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
@@ -693,9 +678,6 @@ static int cpufreq_zenx_speedchange_task(void *data)
 							max_freq,
 							CPUFREQ_RELATION_H);
 			mutex_unlock(&set_speed_lock);
-			trace_cpufreq_zenx_setspeed(cpu,
-						     pcpu->target_freq,
-						     pcpu->policy->cur);
 
 			up_read(&pcpu->enable_sem);
 		}
@@ -1168,12 +1150,8 @@ static ssize_t store_boost(struct kobject *kobj, struct attribute *attr,
 
 	boost_val = val;
 
-	if (boost_val) {
-		trace_cpufreq_zenx_boost("on");
+	if (boost_val)
 		cpufreq_zenx_boost();
-	} else {
-		trace_cpufreq_zenx_unboost("off");
-	}
 
 	return count;
 }
@@ -1191,7 +1169,6 @@ static ssize_t store_boostpulse(struct kobject *kobj, struct attribute *attr,
 		return ret;
 
 	boostpulse_endtime = ktime_to_us(ktime_get()) + boostpulse_duration_val;
-	trace_cpufreq_zenx_boost("pulse");
 	cpufreq_zenx_boost();
 	return count;
 }

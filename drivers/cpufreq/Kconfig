@@ -88,6 +88,30 @@ config CPU_FREQ_DEFAULT_GOV_ONDEMAND
 	  governor. If unsure have a look at the help section of the
 	  driver. Fallback governor will be the performance governor.
 
+config CPU_FREQ_DEFAULT_GOV_ONDEMANDX
+	bool "ondemandx"
+	select CPU_FREQ_GOV_ONDEMANDX
+	select CPU_FREQ_GOV_PERFORMANCE
+	help
+	  Use the CPUFreq governor 'ondemandX' as default.
+
+config CPU_FREQ_DEFAULT_GOV_ADAPTIVE
+	bool "adaptive"
+	select CPU_FREQ_GOV_ADAPTIVE
+	help
+	  Use the CPUFreq governor 'adaptive' as default. This allows
+	  you to get a full dynamic cpu frequency capable system by simply
+	  loading your cpufreq low-level hardware driver, using the
+	  'adaptive' governor for latency-sensitive workloads and demanding
+	  performance.
+
+config CPU_FREQ_DEFAULT_GOV_ADAPTIVEX
+	bool "adaptivex"
+	select CPU_FREQ_GOV_ADAPTIVEX
+	help
+	  Use the CPUFreq governor 'adaptiveX' as default.
+	  'adaptive' with suspend/wake and CPU hotplugging support.
+
 config CPU_FREQ_DEFAULT_GOV_CONSERVATIVE
 	bool "conservative"
 	select CPU_FREQ_GOV_CONSERVATIVE
@@ -109,6 +133,31 @@ config CPU_FREQ_DEFAULT_GOV_INTERACTIVE
 	  loading your cpufreq low-level hardware driver, using the
 	  'interactive' governor for latency-sensitive workloads.
 
+config CPU_FREQ_DEFAULT_GOV_ZENX
+	bool "ZenX"
+	select CPU_FREQ_GOV_ZENX
+	help
+	  Use the CPUFreq governor 'ZenX' as default.
+
+config CPU_FREQ_DEFAULT_GOV_INTELLIDEMAND
+	bool "intellidemand"
+	select CPU_FREQ_GOV_INTELLIDEMAND
+	help
+          Use the CPUFreq governor 'intellidemand' as default.
+
+config CPU_FREQ_DEFAULT_GOV_INTELLIDEMANDX
+        bool "intellidemandX"
+        select CPU_FREQ_GOV_INTELLIDEMANDX
+        help
+          Use the CPUFreq governor 'intellidemandx' as default.
+
+config CPU_FREQ_DEFAULT_GOV_LULZACTIVEQ
+	bool "lulzactiveq"
+	select CPU_FREQ_GOV_LULZACTIVEQ
+
+config CPU_FREQ_DEFAULT_GOV_PEGASUSQ
+	bool "pegasusq"
+	select CPU_FREQ_GOV_PEGASUSQ
 
 config CPU_FREQ_DEFAULT_GOV_HOTPLUG
 	bool "hotplug"
@@ -179,6 +228,9 @@ config CPU_FREQ_GOV_ONDEMAND
 
 	  If in doubt, say N.
 
+config CPU_FREQ_GOV_PEGASUSQ
+	tristate "'pegasusq' cpufreq policy governor"
+
 config CPU_FREQ_GOV_INTERACTIVE
 	tristate "'interactive' cpufreq policy governor"
 	help
@@ -195,6 +247,58 @@ config CPU_FREQ_GOV_INTERACTIVE
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_ZENX
+	tristate "'ZenX' cpufreq governor"
+	depends on CPU_FREQ
+	help
+	  'ZenX' - an interactive-based governor
+
+	  This governor provides full CPU hotplugging support
+	  based on average CPU load across all CPUs.
+
+	  For details, take a look at linux/Documentation/cpu-freq.
+
+	  If in doubt, say N
+
+config CPU_FREQ_GOV_INTELLIDEMAND
+	tristate "'intellidemand' cpufreq governor"
+	depends on CPU_FREQ
+	help
+	  'intellidemand' - an intelligent ondemand governor
+
+config CPU_FREQ_GOV_INTELLIDEMANDX
+        tristate "'intellidemandX' cpufreq governor"
+        depends on CPU_FREQ
+        help
+          'intellidemandx' - an intelligent ondemand governor with
+	  early suspend/wake code and CPU hotplugging.
+
+config CPU_FREQ_GOV_ADAPTIVE
+	tristate "'adaptive' cpufreq policy governor"
+	help
+	  'adaptive' - This driver adds a dynamic cpufreq policy governor
+	  designed for latency-sensitive workloads and also for demanding
+	  performance.
+
+	  This governor attempts to reduce the latency of clock
+	  increases so that the system is more responsive to
+	  interactive workloads in loweset steady-state but to
+	  to reduce power consumption in middle operation level level up
+	  will be done in step by step to prohibit system from going to
+	  max operation level.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called cpufreq_adaptive.
+
+	  For details, take a look at linux/Documentation/cpu-freq.
+
+	  If in doubt, say N.
+
+config CPU_FREQ_GOV_ADAPTIVEX
+	tristate "'adaptiveX' cpufreq policy governor"
+	help
+	  'adaptive' with suspend/wake/hotplugging support.
 
 config CPU_FREQ_GOV_CONSERVATIVE
 	tristate "'conservative' cpufreq governor"
@@ -218,6 +322,10 @@ config CPU_FREQ_GOV_CONSERVATIVE
 	  For details, take a look at linux/Documentation/cpu-freq.
 
 	  If in doubt, say N.
+
+config CPU_FREQ_GOV_ONDEMANDX
+	tristate "'ondemandx' cpufreq governor"
+	depends on CPU_FREQ
 
 menu "x86 CPU frequency scaling drivers"
 depends on X86

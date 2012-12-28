@@ -29,6 +29,7 @@ Contents:
 2.4  Ondemand
 2.5  Conservative
 2.6  Interactive
+2.8  ZenX
 
 3.   The Governor Interface in the CPUfreq Core
 
@@ -278,6 +279,76 @@ entropy and leads to lots of spurious plug-in and plug-out transitions.
 The number of sampling periods averaged together is tunable via the
 "hotplug_in_sampling_periods" and "hotplug_out_sampling_periods"
 run-time tunable parameters.
+
+2.8 ZenX
+---------------
+
+The CPUfreq governor "ZenX" behaves exactly the same as
+"interactive" when scaling frequencies.
+
+ZenX hotplugs CPUs based on the average CPU load across all CPUs, but 
+it only makes hotplug determinations after a certain amount of
+sampling periods (similar to hotplug governor).
+
+Hotplugging can be disabled per-CPU by setting 
+unplug_load_cpu[#] to 0.
+
+The tuneable values for this governor are:
+
+target_loads: CPU load values used to adjust speed to influence the
+current CPU load toward that value.  In general, the lower the target
+load, the more often the governor will raise CPU speeds to bring load
+below the target.  The format is a single target load, optionally
+followed by pairs of CPU speeds and CPU loads to target at or above
+those speeds.  Colons can be used between the speeds and associated
+target loads for readability.  For example:
+
+   85 1000000:90 1700000:99
+
+targets CPU load 85% below speed 1GHz, 90% at or above 1GHz, until
+1.7GHz and above, at which load 99% is targeted.  If speeds are
+specified these must appear in ascending order.  Higher target load
+values are typically specified for higher speeds, that is, target load
+values also usually appear in an ascending order. The default is
+target load 90% for all speeds.
+
+min_sample_time: The minimum amount of time to spend at the current
+frequency before ramping down. This is to ensure that the governor has
+seen enough historic cpu load data to determine the appropriate
+workload.  Default is 80000 uS.
+
+hispeed_freq: An intermediate "hi speed" at which to initially ramp
+when CPU load hits the value specified in go_hispeed_load.  If load
+stays high for the amount of time specified in above_hispeed_delay,
+then speed may be bumped higher.  Default is maximum speed.
+
+go_hispeed_load: The CPU load at which to ramp to the intermediate "hi
+speed".  Default is 85%.
+
+above_hispeed_delay: Once speed is set to hispeed_freq, wait for this
+long before bumping speed higher in response to continued high load.
+Default is 20000 uS.
+
+timer_rate: Sample rate for reevaluating cpu load when the system is
+not idle.  Default is 20000 uS.
+
+suspend_frequency: The target frequency we should apply when going into
+suspend.
+
+hot_add_sampling_periods: How many sampling periods we wait before
+checking average CPU load to add a CPU.
+
+hot_remove_sampling_periods: How many sampling periods we wait before
+checking average CPU load to remove a CPU.
+
+unplug_load_cpu1: CPU load that we should unplug CPU 1 at. 
+Default is 25%
+
+unplug_load_cpu2: CPU load that we should unplug CPU 2 at.
+default is 50%
+
+unplug_load_cpumore: CPU load that we should unplug CPUs 3-7 at.
+default is 50%
 
 3. The Governor Interface in the CPUfreq Core
 =============================================

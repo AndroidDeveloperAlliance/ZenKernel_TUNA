@@ -46,6 +46,10 @@ config ZEN_INFO_VERSION_CODE
  
 endmenu
 
+config ANDROID41_COMPAT
+	bool "Build with compatiblity for android 4.1 by default"
+	default n
+
 menu "General setup"
 
 config EXPERIMENTAL

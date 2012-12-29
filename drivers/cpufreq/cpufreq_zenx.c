@@ -327,7 +327,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int loadadjfreq;
 	unsigned int index, up_load_index;
 	unsigned int total_load = 0;
-	unsigned int rearm_if_notmax = 1;
+	unsigned int rearm_if_notmax = 0;
 	unsigned long flags;
 	bool boosted;
 
@@ -375,7 +375,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
 	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
-		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 
@@ -386,7 +385,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
-		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 

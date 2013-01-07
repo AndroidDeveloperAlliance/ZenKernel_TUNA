@@ -35,7 +35,7 @@
 
 #include <asm/cputime.h>
 
-static atomic_t active_count = ATOMIC_INIT(0);
+static int active_count;
 
 struct cpufreq_zenx_cpuinfo {
 	struct timer_list cpu_timer;
@@ -66,6 +66,7 @@ static DEFINE_PER_CPU(struct cpufreq_zenx_cpuinfo, cpuinfo);
 static struct task_struct *speedchange_task;
 static cpumask_t speedchange_cpumask;
 static spinlock_t speedchange_cpumask_lock;
+static struct mutex gov_lock;
 
 /* workqueues handle hotplugging */
 static struct workqueue_struct *hotplug_add_wq;
@@ -1292,6 +1293,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		if (!cpu_online(policy->cpu))
 			return -EINVAL;
 
+		mutex_lock(&gov_lock);
+
 		freq_table =
 			cpufreq_frequency_get_table(policy->cpu);
 		if (!hispeed_freq)
@@ -1331,13 +1334,17 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		 * Do not register the idle hook and create sysfs
 		 * entries if we have already done so.
 		 */
-		if (atomic_inc_return(&active_count) > 1)
+		if (++active_count > 1) {
+			mutex_unlock(&gov_lock);
 			return 0;
+		}
 
 		rc = sysfs_create_group(cpufreq_global_kobject,
 				&zenx_attr_group);
-		if (rc)
+		if (rc) {
+			mutex_unlock(&gov_lock);
 			return rc;
+		}
 
 #ifdef CONFIG_EARLYSUSPEND
 		register_early_suspend(&zenx_power_suspend);
@@ -1345,9 +1352,11 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		idle_notifier_register(&cpufreq_zenx_idle_nb);
 		cpufreq_register_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
+		mutex_unlock(&gov_lock);
 		break;
 
 	case CPUFREQ_GOV_STOP:
+		mutex_lock(&gov_lock);
 		for_each_cpu(j, policy->cpus) {
 			pcpu = &per_cpu(cpuinfo, j);
 			down_write(&pcpu->enable_sem);
@@ -1357,14 +1366,17 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			up_write(&pcpu->enable_sem);
 		}
 
-		if (atomic_dec_return(&active_count) > 0)
+		if (--active_count > 0) {
+			mutex_unlock(&gov_lock);
 			return 0;
+		}
 
 		cpufreq_unregister_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
 		idle_notifier_unregister(&cpufreq_zenx_idle_nb);
 		sysfs_remove_group(cpufreq_global_kobject,
 				&zenx_attr_group);
+		mutex_unlock(&gov_lock);
 
 #ifdef CONFIG_EARLYSUSPEND
 		unregister_early_suspend(&zenx_power_suspend);
@@ -1412,6 +1424,7 @@ static int __init cpufreq_zenx_init(void)
 
 	spin_lock_init(&target_loads_lock);
 	spin_lock_init(&speedchange_cpumask_lock);
+	mutex_init(&gov_lock);
 
 	speedchange_task =
 		kthread_create(cpufreq_zenx_speedchange_task, NULL,

@@ -327,7 +327,8 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int loadadjfreq;
 	unsigned int index, up_load_index;
 	unsigned int total_load = 0;
-	unsigned int rearm_if_notmax = 0;
+	unsigned int cpu_is_online;
+	unsigned int rearm_if_notmax = 1;
 	unsigned long flags;
 	bool boosted;
 
@@ -341,8 +342,13 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 * Skip load calculation and frequency logic for this CPU
 	 * if it is offline.
 	 */
-	if (data > 0 && !cpu_online(data))
-		goto call_hp_work;
+	if (data > 0) {
+		cpu_is_online = cpu_online(data);
+		if (!cpu_is_online)
+			goto call_hp_work;
+	} else {
+		cpu_is_online = 1;
+	}
 
 	spin_lock(&pcpu->load_lock);
 	now = update_load(data);
@@ -350,8 +356,10 @@ static void cpufreq_zenx_timer(unsigned long data)
 	cputime_speedadj = pcpu->cputime_speedadj;
 	spin_unlock(&pcpu->load_lock);
 
-	if (WARN_ON_ONCE(!delta_time))
+	if (WARN_ON_ONCE(!delta_time)) {
+		rearm_if_notmax = 0;
 		goto rearm;
+	}
 
 	do_div(cputime_speedadj, delta_time);
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
@@ -375,6 +383,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
 	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
+		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 
@@ -385,6 +394,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
+		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 
@@ -396,6 +406,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 */
 	if (new_freq < pcpu->floor_freq) {
 		if (now - pcpu->floor_validate_time < min_sample_time) {
+			rearm_if_notmax = 0;
 			goto call_hp_work;
 		}
 	}
@@ -414,7 +425,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	}
 
 	if (pcpu->target_freq == new_freq) {
-		rearm_if_notmax = 1;
 		goto call_hp_work;
 	}
 
@@ -486,7 +496,7 @@ call_hp_work:
 	}
 
 rearm:
-	if (rearm_if_notmax) {
+	if (rearm_if_notmax && cpu_is_online) {
 		/*
 		 * Already set max speed and don't see a need to change that,
 		 * wait until next idle to re-evaluate, don't need timer.

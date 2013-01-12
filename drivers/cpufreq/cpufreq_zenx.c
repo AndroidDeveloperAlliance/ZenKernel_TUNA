@@ -66,7 +66,6 @@ static DEFINE_PER_CPU(struct cpufreq_zenx_cpuinfo, cpuinfo);
 static struct task_struct *speedchange_task;
 static cpumask_t speedchange_cpumask;
 static spinlock_t speedchange_cpumask_lock;
-static struct mutex set_speed_lock;
 
 /* workqueues handle hotplugging */
 static struct workqueue_struct *hotplug_add_wq;
@@ -593,9 +592,7 @@ static void cpufreq_zenx_hotplug_add_cpu_work(struct work_struct *work)
 		}
 
 		if (cpu > 0 && !cpu_online(cpu)) {
-			mutex_lock(&set_speed_lock);
 			cpu_up(cpu);
-			mutex_unlock(&set_speed_lock);
 		}
 		up_read(&pcpu->enable_sem);
 	}
@@ -624,9 +621,7 @@ static void cpufreq_zenx_hotplug_remove_cpu_work(struct work_struct *work)
 		}
 
 		if (cpu > 0 && cpu_online(cpu)) {
-			mutex_lock(&set_speed_lock);
 			cpu_down(cpu);
-			mutex_unlock(&set_speed_lock);
 		}
 
 		up_read(&pcpu->enable_sem);
@@ -673,8 +668,6 @@ static int cpufreq_zenx_speedchange_task(void *data)
 				continue;
 			}
 
-			mutex_lock(&set_speed_lock);
-
 			for_each_cpu(j, pcpu->policy->cpus) {
 				struct cpufreq_zenx_cpuinfo *pjcpu =
 					&per_cpu(cpuinfo, j);
@@ -687,8 +680,6 @@ static int cpufreq_zenx_speedchange_task(void *data)
 				__cpufreq_driver_target(pcpu->policy,
 							max_freq,
 							CPUFREQ_RELATION_H);
-			mutex_unlock(&set_speed_lock);
-
 			up_read(&pcpu->enable_sem);
 		}
 	}
@@ -1421,7 +1412,6 @@ static int __init cpufreq_zenx_init(void)
 
 	spin_lock_init(&target_loads_lock);
 	spin_lock_init(&speedchange_cpumask_lock);
-	mutex_init(&set_speed_lock);
 
 	speedchange_task =
 		kthread_create(cpufreq_zenx_speedchange_task, NULL,

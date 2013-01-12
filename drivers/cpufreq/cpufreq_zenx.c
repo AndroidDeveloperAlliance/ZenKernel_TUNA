@@ -35,7 +35,7 @@
 
 #include <asm/cputime.h>
 
-static atomic_t active_count = ATOMIC_INIT(0);
+static int active_count;
 
 struct cpufreq_zenx_cpuinfo {
 	struct timer_list cpu_timer;
@@ -66,7 +66,7 @@ static DEFINE_PER_CPU(struct cpufreq_zenx_cpuinfo, cpuinfo);
 static struct task_struct *speedchange_task;
 static cpumask_t speedchange_cpumask;
 static spinlock_t speedchange_cpumask_lock;
-static struct mutex set_speed_lock;
+static struct mutex gov_lock;
 
 /* workqueues handle hotplugging */
 static struct workqueue_struct *hotplug_add_wq;
@@ -176,6 +176,7 @@ static void cpufreq_zenx_timer_resched(
 	struct cpufreq_zenx_cpuinfo *pcpu)
 {
 	unsigned long expires = jiffies + usecs_to_jiffies(curr_timer_rate);
+	unsigned long flags;
 
 	mod_timer_pinned(&pcpu->cpu_timer, expires);
 	if (timer_slack_val >= 0 && pcpu->target_freq > pcpu->policy->min) {
@@ -183,27 +184,28 @@ static void cpufreq_zenx_timer_resched(
 		mod_timer_pinned(&pcpu->cpu_slack_timer, expires);
 	}
 
-	spin_lock(&pcpu->load_lock);
+	spin_lock_irqsave(&pcpu->load_lock, flags);
 	pcpu->time_in_idle =
 		get_cpu_idle_time_us(smp_processor_id(),
 				     &pcpu->time_in_idle_timestamp);
 	pcpu->cputime_speedadj = 0;
 	pcpu->cputime_speedadj_timestamp = pcpu->time_in_idle_timestamp;
-	spin_unlock(&pcpu->load_lock);
+	spin_unlock_irqrestore(&pcpu->load_lock, flags);
 }
 
 static unsigned int freq_to_targetload(unsigned int freq)
 {
 	int i;
 	unsigned int ret;
+	unsigned long flags;
 
-	spin_lock(&target_loads_lock);
+	spin_lock_irqsave(&target_loads_lock, flags);
 
 	for (i = 0; i < ntarget_loads - 1 && freq >= target_loads[i+1]; i += 2)
 		;
 
 	ret = target_loads[i];
-	spin_unlock(&target_loads_lock);
+	spin_unlock_irqrestore(&target_loads_lock, flags);
 	return ret;
 }
 
@@ -327,7 +329,8 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int loadadjfreq;
 	unsigned int index, up_load_index;
 	unsigned int total_load = 0;
-	unsigned int rearm_if_notmax = 0;
+	unsigned int cpu_is_online;
+	unsigned int rearm_if_notmax = 1;
 	unsigned long flags;
 	bool boosted;
 
@@ -341,17 +344,24 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 * Skip load calculation and frequency logic for this CPU
 	 * if it is offline.
 	 */
-	if (data > 0 && !cpu_online(data))
-		goto call_hp_work;
+	if (data > 0) {
+		cpu_is_online = cpu_online(data);
+		if (!cpu_is_online)
+			goto call_hp_work;
+	} else {
+		cpu_is_online = 1;
+	}
 
-	spin_lock(&pcpu->load_lock);
+	spin_lock_irqsave(&pcpu->load_lock, flags);
 	now = update_load(data);
 	delta_time = (unsigned int)(now - pcpu->cputime_speedadj_timestamp);
 	cputime_speedadj = pcpu->cputime_speedadj;
-	spin_unlock(&pcpu->load_lock);
+	spin_unlock_irqrestore(&pcpu->load_lock, flags);
 
-	if (WARN_ON_ONCE(!delta_time))
+	if (WARN_ON_ONCE(!delta_time)) {
+		rearm_if_notmax = 0;
 		goto rearm;
+	}
 
 	do_div(cputime_speedadj, delta_time);
 	loadadjfreq = (unsigned int)cputime_speedadj * 100;
@@ -375,6 +385,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
 	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
+		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 
@@ -385,6 +396,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
+		rearm_if_notmax = 0;
 		goto call_hp_work;
 	}
 
@@ -396,6 +408,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 */
 	if (new_freq < pcpu->floor_freq) {
 		if (now - pcpu->floor_validate_time < min_sample_time) {
+			rearm_if_notmax = 0;
 			goto call_hp_work;
 		}
 	}
@@ -414,7 +427,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	}
 
 	if (pcpu->target_freq == new_freq) {
-		rearm_if_notmax = 1;
 		goto call_hp_work;
 	}
 
@@ -486,7 +498,7 @@ call_hp_work:
 	}
 
 rearm:
-	if (rearm_if_notmax) {
+	if (rearm_if_notmax && cpu_is_online) {
 		/*
 		 * Already set max speed and don't see a need to change that,
 		 * wait until next idle to re-evaluate, don't need timer.
@@ -581,9 +593,7 @@ static void cpufreq_zenx_hotplug_add_cpu_work(struct work_struct *work)
 		}
 
 		if (cpu > 0 && !cpu_online(cpu)) {
-			mutex_lock(&set_speed_lock);
 			cpu_up(cpu);
-			mutex_unlock(&set_speed_lock);
 		}
 		up_read(&pcpu->enable_sem);
 	}
@@ -612,9 +622,7 @@ static void cpufreq_zenx_hotplug_remove_cpu_work(struct work_struct *work)
 		}
 
 		if (cpu > 0 && cpu_online(cpu)) {
-			mutex_lock(&set_speed_lock);
 			cpu_down(cpu);
-			mutex_unlock(&set_speed_lock);
 		}
 
 		up_read(&pcpu->enable_sem);
@@ -661,8 +669,6 @@ static int cpufreq_zenx_speedchange_task(void *data)
 				continue;
 			}
 
-			mutex_lock(&set_speed_lock);
-
 			for_each_cpu(j, pcpu->policy->cpus) {
 				struct cpufreq_zenx_cpuinfo *pjcpu =
 					&per_cpu(cpuinfo, j);
@@ -675,8 +681,6 @@ static int cpufreq_zenx_speedchange_task(void *data)
 				__cpufreq_driver_target(pcpu->policy,
 							max_freq,
 							CPUFREQ_RELATION_H);
-			mutex_unlock(&set_speed_lock);
-
 			up_read(&pcpu->enable_sem);
 		}
 	}
@@ -725,6 +729,7 @@ static int cpufreq_zenx_notifier(
 	struct cpufreq_freqs *freq = data;
 	struct cpufreq_zenx_cpuinfo *pcpu;
 	int cpu;
+	unsigned long flags;
 
 	if (val == CPUFREQ_POSTCHANGE) {
 		pcpu = &per_cpu(cpuinfo, freq->cpu);
@@ -732,9 +737,9 @@ static int cpufreq_zenx_notifier(
 		for_each_cpu(cpu, pcpu->policy->cpus) {
 			struct cpufreq_zenx_cpuinfo *pjcpu =
 				&per_cpu(cpuinfo, cpu);
-			spin_lock(&pjcpu->load_lock);
+			spin_lock_irqsave(&pjcpu->load_lock, flags);
 			update_load(cpu);
-			spin_unlock(&pjcpu->load_lock);
+			spin_unlock_irqrestore(&pjcpu->load_lock, flags);
 		}
 	}
 
@@ -750,15 +755,16 @@ static ssize_t show_target_loads(
 {
 	int i;
 	ssize_t ret = 0;
+	unsigned long flags;
 
-	spin_lock(&target_loads_lock);
+	spin_lock_irqsave(&target_loads_lock, flags);
 
 	for (i = 0; i < ntarget_loads; i++)
 		ret += sprintf(buf + ret, "%u%s", target_loads[i],
 			       i & 0x1 ? ":" : " ");
 
 	ret += sprintf(buf + ret, "\n");
-	spin_unlock(&target_loads_lock);
+	spin_unlock_irqrestore(&target_loads_lock, flags);
 	return ret;
 }
 
@@ -771,6 +777,7 @@ static ssize_t store_target_loads(
 	unsigned int *new_target_loads = NULL;
 	int ntokens = 1;
 	int i;
+	unsigned long flags;
 
 	cp = buf;
 	while ((cp = strpbrk(cp + 1, " :")))
@@ -800,12 +807,12 @@ static ssize_t store_target_loads(
 	if (i != ntokens)
 		goto err_inval;
 
-	spin_lock(&target_loads_lock);
+	spin_lock_irqsave(&target_loads_lock, flags);
 	if (target_loads != default_target_loads)
 		kfree(target_loads);
 	target_loads = new_target_loads;
 	ntarget_loads = ntokens;
-	spin_unlock(&target_loads_lock);
+	spin_unlock_irqrestore(&target_loads_lock, flags);
 	return count;
 
 err_inval:
@@ -1286,6 +1293,8 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		if (!cpu_online(policy->cpu))
 			return -EINVAL;
 
+		mutex_lock(&gov_lock);
+
 		freq_table =
 			cpufreq_frequency_get_table(policy->cpu);
 		if (!hispeed_freq)
@@ -1325,13 +1334,17 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		 * Do not register the idle hook and create sysfs
 		 * entries if we have already done so.
 		 */
-		if (atomic_inc_return(&active_count) > 1)
+		if (++active_count > 1) {
+			mutex_unlock(&gov_lock);
 			return 0;
+		}
 
 		rc = sysfs_create_group(cpufreq_global_kobject,
 				&zenx_attr_group);
-		if (rc)
+		if (rc) {
+			mutex_unlock(&gov_lock);
 			return rc;
+		}
 
 #ifdef CONFIG_EARLYSUSPEND
 		register_early_suspend(&zenx_power_suspend);
@@ -1339,9 +1352,11 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 		idle_notifier_register(&cpufreq_zenx_idle_nb);
 		cpufreq_register_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
+		mutex_unlock(&gov_lock);
 		break;
 
 	case CPUFREQ_GOV_STOP:
+		mutex_lock(&gov_lock);
 		for_each_cpu(j, policy->cpus) {
 			pcpu = &per_cpu(cpuinfo, j);
 			down_write(&pcpu->enable_sem);
@@ -1351,14 +1366,17 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			up_write(&pcpu->enable_sem);
 		}
 
-		if (atomic_dec_return(&active_count) > 0)
+		if (--active_count > 0) {
+			mutex_unlock(&gov_lock);
 			return 0;
+		}
 
 		cpufreq_unregister_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
 		idle_notifier_unregister(&cpufreq_zenx_idle_nb);
 		sysfs_remove_group(cpufreq_global_kobject,
 				&zenx_attr_group);
+		mutex_unlock(&gov_lock);
 
 #ifdef CONFIG_EARLYSUSPEND
 		unregister_early_suspend(&zenx_power_suspend);
@@ -1406,7 +1424,7 @@ static int __init cpufreq_zenx_init(void)
 
 	spin_lock_init(&target_loads_lock);
 	spin_lock_init(&speedchange_cpumask_lock);
-	mutex_init(&set_speed_lock);
+	mutex_init(&gov_lock);
 
 	speedchange_task =
 		kthread_create(cpufreq_zenx_speedchange_task, NULL,

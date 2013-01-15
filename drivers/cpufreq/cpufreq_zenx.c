@@ -30,7 +30,6 @@
 #include <linux/timer.h>
 #include <linux/workqueue.h>
 #include <linux/kthread.h>
-#include <linux/earlysuspend.h>
 #include <linux/slab.h>
 
 #include <asm/cputime.h>
@@ -88,7 +87,7 @@ static unsigned long go_hispeed_load = DEFAULT_GO_HISPEED_LOAD;
 /* Unplug auxillary CPUs below these values. */
 #define DEFAULT_UNPLUG_LOAD_CPU1 35
 #define DEFAULT_UNPLUG_LOAD_CPU2 50
-#define DEFAULT_UNPLUG_LOAD_CPUMORE 50
+#define DEFAULT_UNPLUG_LOAD_CPUMORE 70
 
 static unsigned int unplug_load[] =
 	{ DEFAULT_UNPLUG_LOAD_CPU1,
@@ -107,21 +106,15 @@ static int ntarget_loads = ARRAY_SIZE(default_target_loads);
  * Number of sampling periods to take average CPU load across
  * for CPU removal.
  */
-#define DEFAULT_NR_REMOVE_PERIODS (100)
-#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (40)
-static unsigned int curr_hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
+#define DEFAULT_NR_REMOVE_PERIODS (75)
 static unsigned int hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
-static unsigned int hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
 
 /*
  * Number of sampling periods to take average CPU load across
  * for CPU add.
  */
-#define DEFAULT_NR_ADD_PERIODS (40)
-#define DEFAULT_NR_ADD_PERIODS_SUSPENDED (100)
-static unsigned int curr_hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
+#define DEFAULT_NR_ADD_PERIODS (60)
 static unsigned int hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
-static unsigned int hot_add_sampling_periods_suspended = DEFAULT_NR_ADD_PERIODS_SUSPENDED;
 
 /*
  * The minimum amount of time to spend at a frequency before we can ramp down.
@@ -327,7 +320,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	unsigned int index, up_load_index;
 	unsigned int total_load = 0;
 	unsigned int cpu_is_online;
-	unsigned int rearm_if_notmax = 1;
 	unsigned long flags;
 	bool boosted;
 
@@ -343,8 +335,12 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 */
 	if (data > 0) {
 		cpu_is_online = cpu_online(data);
-		if (!cpu_is_online)
-			goto call_hp_work;
+		if (!cpu_is_online) {
+			boosted = false;
+			new_freq = 0;
+			now = 0;
+			goto prep_hotplug_work;
+		}
 	} else {
 		cpu_is_online = 1;
 	}
@@ -356,7 +352,6 @@ static void cpufreq_zenx_timer(unsigned long data)
 	spin_unlock_irqrestore(&pcpu->load_lock, flags);
 
 	if (WARN_ON_ONCE(!delta_time)) {
-		rearm_if_notmax = 0;
 		goto rearm;
 	}
 
@@ -382,8 +377,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	if (pcpu->target_freq >= hispeed_freq &&
 	    new_freq > pcpu->target_freq &&
 	    now - pcpu->hispeed_validate_time < above_hispeed_delay_val) {
-		rearm_if_notmax = 0;
-		goto call_hp_work;
+		goto rearm;
 	}
 
 	pcpu->hispeed_validate_time = now;
@@ -393,11 +387,37 @@ static void cpufreq_zenx_timer(unsigned long data)
 					   &index)) {
 		pr_warn_once("timer %d: cpufreq_frequency_table_target error\n",
 			     (int) data);
-		rearm_if_notmax = 0;
-		goto call_hp_work;
+		goto rearm;
 	}
 
 	new_freq = pcpu->freq_table[index].frequency;
+
+prep_hotplug_work:
+	/*
+	 * Increment nr_periods_add/remove and add the
+	 * average load to the load counters for all
+	 * CPUs > 0.
+	 */
+	if (data > 0) {
+	        /*
+	         * Compute average load across all online CPUs
+        	 */
+        	for_each_cpu(cpu, cpu_online_mask) {
+			struct cpufreq_zenx_cpuinfo *pjcpu =
+				&per_cpu(cpuinfo, cpu);
+
+			total_load += pjcpu->last_cpu_load;
+		}
+		avg_load = total_load / num_online_cpus();
+
+		pcpu->nr_periods_add++;
+		pcpu->nr_periods_remove++;
+		pcpu->add_avg_load+=avg_load;
+		pcpu->remove_avg_load+=avg_load;
+
+		if (!cpu_is_online)
+			goto do_hotplug_work;
+	}
 
 	/*
 	 * Do not scale below floor_freq unless we have been at or above the
@@ -405,8 +425,7 @@ static void cpufreq_zenx_timer(unsigned long data)
 	 */
 	if (new_freq < pcpu->floor_freq) {
 		if (now - pcpu->floor_validate_time < min_sample_time) {
-			rearm_if_notmax = 0;
-			goto call_hp_work;
+			goto rearm;
 		}
 	}
 
@@ -424,38 +443,18 @@ static void cpufreq_zenx_timer(unsigned long data)
 	}
 
 	if (pcpu->target_freq == new_freq) {
-		goto call_hp_work;
+		goto rearm_if_notmax;
 	}
 
-	pcpu->target_freq = new_freq;
-	spin_lock_irqsave(&speedchange_cpumask_lock, flags);
-	cpumask_set_cpu(data, &speedchange_cpumask);
-	spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
-	wake_up_process(speedchange_task);
-
-call_hp_work:
-	/* Skip hot-add/remove calculations for CPU 0 */
+do_hotplug_work:
 	if (data > 0) {
+		/*
+		 * Determine index of unplug_load for this CPU.
+		 */
 		if (data > 2)
 			up_load_index = 2;
 		else
 			up_load_index = data - 1;
-	        /*
-	         * Compute average load across all online CPUs
-        	 */
-        	for_each_cpu(cpu, cpu_online_mask) {
-			struct cpufreq_zenx_cpuinfo *pjcpu =
-				&per_cpu(cpuinfo, cpu);
-
-			total_load += pjcpu->last_cpu_load;
-		}
-		avg_load = total_load / num_online_cpus();
-
-		/* Increment nr_periods_add/remove and load */
-		pcpu->nr_periods_add++;
-		pcpu->nr_periods_remove++;
-		pcpu->add_avg_load+=avg_load;
-		pcpu->remove_avg_load+=avg_load;
 
 		/*
 		 * If we've been here for at least hot_add/remove
@@ -463,13 +462,15 @@ call_hp_work:
 		 * compare average load to unplug_load. If it exceeds
 		 * add the CPU, if it is lower than remove the CPU.
 		 */
-		if (pcpu->nr_periods_add >= curr_hot_add_sampling_periods) {
+		if (pcpu->nr_periods_add >= hot_add_sampling_periods) {
 			if (pcpu->add_avg_load / pcpu->nr_periods_add
 			    > unplug_load[up_load_index]) {
-				spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
-				cpumask_set_cpu(data, &hotplug_add_cpumask);
-				spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
-				queue_work(hotplug_add_wq, &hotplug_add_work);
+				if (!cpu_is_online) {
+					spin_lock_irqsave(&hotplug_add_cpumask_lock, flags);
+					cpumask_set_cpu(data, &hotplug_add_cpumask);
+					spin_unlock_irqrestore(&hotplug_add_cpumask_lock, flags);
+					queue_work(hotplug_add_wq, &hotplug_add_work);
+				}
 				/* Reset remove counters so we don't instantly do more work. */
 				pcpu->remove_avg_load = 0;
 				pcpu->nr_periods_remove = 0;
@@ -477,16 +478,20 @@ call_hp_work:
 			/* Reset add period counters */
 			pcpu->add_avg_load = 0;
 			pcpu->nr_periods_add = 0;
-		} else if (pcpu->nr_periods_remove >= curr_hot_remove_sampling_periods) {
+		} else if (pcpu->nr_periods_remove >= hot_remove_sampling_periods) {
 			if (pcpu->remove_avg_load / pcpu->nr_periods_remove
 			    <= unplug_load[up_load_index]) {
-				spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
-				cpumask_set_cpu(data, &hotplug_remove_cpumask);
-				spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
-				queue_work(hotplug_remove_wq, &hotplug_remove_work);
+				if (cpu_is_online) {
+					spin_lock_irqsave(&hotplug_remove_cpumask_lock, flags);
+					cpumask_set_cpu(data, &hotplug_remove_cpumask);
+					spin_unlock_irqrestore(&hotplug_remove_cpumask_lock, flags);
+					queue_work(hotplug_remove_wq, &hotplug_remove_work);
+				}
 				/* Reset add counters so we don't instantly do more work. */
 				pcpu->add_avg_load = 0;
 				pcpu->nr_periods_add = 0;
+				/* Plan that this CPU is offline for the rest of this period. */
+				cpu_is_online = 0;
 			}
 			/* Reset remove period counters */
 			pcpu->remove_avg_load = 0;
@@ -494,8 +499,19 @@ call_hp_work:
 		}
 	}
 
-rearm:
-	if (rearm_if_notmax && cpu_is_online) {
+	/*
+	 * Don't wake up speedchange_task if CPU is offline.
+	 */
+	if (cpu_is_online) {
+		pcpu->target_freq = new_freq;
+		spin_lock_irqsave(&speedchange_cpumask_lock, flags);
+		cpumask_set_cpu(data, &speedchange_cpumask);
+		spin_unlock_irqrestore(&speedchange_cpumask_lock, flags);
+		wake_up_process(speedchange_task);
+	}
+
+rearm_if_notmax:
+	if (cpu_is_online) {
 		/*
 		 * Already set max speed and don't see a need to change that,
 		 * wait until next idle to re-evaluate, don't need timer.
@@ -504,6 +520,7 @@ rearm:
 			goto exit;
 	}
 
+rearm:
 	if (!timer_pending(&pcpu->cpu_timer))
 		cpufreq_zenx_timer_resched(pcpu);
 
@@ -589,7 +606,7 @@ static void cpufreq_zenx_hotplug_add_cpu_work(struct work_struct *work)
 			continue;
 		}
 
-		if (cpu > 0 && !cpu_online(cpu)) {
+		if (likely(cpu > 0)) {
 			cpu_up(cpu);
 		}
 		up_read(&pcpu->enable_sem);
@@ -618,7 +635,7 @@ static void cpufreq_zenx_hotplug_remove_cpu_work(struct work_struct *work)
 			continue;
 		}
 
-		if (cpu > 0 && cpu_online(cpu)) {
+		if (likely(cpu > 0)) {
 			cpu_down(cpu);
 		}
 
@@ -957,28 +974,6 @@ static ssize_t store_hot_remove_sampling_periods(struct kobject *kobj,
 static struct global_attr hot_remove_sampling_periods_attr = __ATTR(hot_remove_sampling_periods, 0644,
 		show_hot_remove_sampling_periods, store_hot_remove_sampling_periods);
 
-static ssize_t show_hot_remove_sampling_periods_suspended(struct kobject *kobj,
-				struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%u\n", hot_remove_sampling_periods_suspended);
-}
-
-static ssize_t store_hot_remove_sampling_periods_suspended(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned int val;
-
-	ret = sscanf(buf, "%u\n", &val);
-	if (ret < 0)
-		return ret;
-	hot_remove_sampling_periods_suspended = val;
-	return count;
-}
-
-static struct global_attr hot_remove_sampling_periods_suspended_attr = __ATTR(hot_remove_sampling_periods_suspended, 0644,
-		show_hot_remove_sampling_periods_suspended, store_hot_remove_sampling_periods_suspended);
-
 static ssize_t show_hot_add_sampling_periods(struct kobject *kobj,
 				struct attribute *attr, char *buf)
 {
@@ -1000,28 +995,6 @@ static ssize_t store_hot_add_sampling_periods(struct kobject *kobj,
 
 static struct global_attr hot_add_sampling_periods_attr = __ATTR(hot_add_sampling_periods, 0644,
 		show_hot_add_sampling_periods, store_hot_add_sampling_periods);
-
-static ssize_t show_hot_add_sampling_periods_suspended(struct kobject *kobj,
-				struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%u\n", hot_add_sampling_periods_suspended);
-}
-
-static ssize_t store_hot_add_sampling_periods_suspended(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned int val;
-
-	ret = sscanf(buf, "%u\n", &val);
-	if (ret < 0)
-		return ret;
-	hot_add_sampling_periods_suspended = val;
-	return count;
-}
-
-static struct global_attr hot_add_sampling_periods_suspended_attr = __ATTR(hot_add_sampling_periods_suspended, 0644,
-		show_hot_add_sampling_periods_suspended, store_hot_add_sampling_periods_suspended);
 
 static ssize_t show_min_sample_time(struct kobject *kobj,
 				struct attribute *attr, char *buf)
@@ -1188,9 +1161,7 @@ static struct attribute *zenx_attributes[] = {
 	&unplug_load_cpu2_attr.attr,
 	&unplug_load_cpumore_attr.attr,
 	&hot_remove_sampling_periods_attr.attr,
-	&hot_remove_sampling_periods_suspended_attr.attr,
 	&hot_add_sampling_periods_attr.attr,
-	&hot_add_sampling_periods_suspended_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
 	&timer_slack.attr,
@@ -1204,33 +1175,6 @@ static struct attribute_group zenx_attr_group = {
 	.attrs = zenx_attributes,
 	.name = "zenx",
 };
-
-#ifdef CONFIG_EARLYSUSPEND
-static void zenx_early_suspend(struct early_suspend *handler) {
-	/*
-	 * Adjust parameters of the governor on suspend for
-	 * power savings
-	 */
-	curr_hot_remove_sampling_periods = hot_remove_sampling_periods_suspended;
-	curr_hot_add_sampling_periods = hot_add_sampling_periods_suspended;
-}
-
-static void zenx_late_resume(struct early_suspend *handler) {
-	/*
-	 * Adjust parameters of the governor back to defaults.
-	 * Using offsets allows us not to overwrite user values.
-	 */
-	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
-	curr_hot_add_sampling_periods = hot_add_sampling_periods;
-	cpufreq_zenx_boost();
-}
-
-static struct early_suspend zenx_power_suspend = {
-	.suspend = zenx_early_suspend,
-	.resume = zenx_late_resume,
-	.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1,
-};
-#endif
 
 static int cpufreq_zenx_idle_notifier(struct notifier_block *nb,
 					     unsigned long val,
@@ -1318,9 +1262,6 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			return rc;
 		}
 
-#ifdef CONFIG_EARLYSUSPEND
-		register_early_suspend(&zenx_power_suspend);
-#endif
 		idle_notifier_register(&cpufreq_zenx_idle_nb);
 		cpufreq_register_notifier(
 			&cpufreq_notifier_block, CPUFREQ_TRANSITION_NOTIFIER);
@@ -1350,9 +1291,6 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 				&zenx_attr_group);
 		mutex_unlock(&gov_lock);
 
-#ifdef CONFIG_EARLYSUSPEND
-		unregister_early_suspend(&zenx_power_suspend);
-#endif
 		/*
 		 * XXX BIG CAVEAT: Stopping the governor with CPU1 offline
 		 * will result in it remaining offline until the user onlines
@@ -1454,5 +1392,5 @@ MODULE_AUTHOR("Mike Chan <mike@android.com>");
 MODULE_AUTHOR("Brandon Berhent <bbedward@androiddeveloperalliance.org>");
 MODULE_DESCRIPTION("'cpufreq_zenx' - A cpufreq governor for "
 	"Latency sensitive workloads with load-based hotplugging.");
-MODULE_VERSION("2.1");
+MODULE_VERSION("2.2");
 MODULE_LICENSE("GPL");

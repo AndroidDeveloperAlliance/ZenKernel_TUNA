@@ -108,7 +108,7 @@ static int ntarget_loads = ARRAY_SIZE(default_target_loads);
  * for CPU removal.
  */
 #define DEFAULT_NR_REMOVE_PERIODS (100)
-#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (50)
+#define DEFAULT_NR_REMOVE_PERIODS_SUSPENDED (40)
 static unsigned int curr_hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
 static unsigned int hot_remove_sampling_periods = DEFAULT_NR_REMOVE_PERIODS;
 static unsigned int hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PERIODS_SUSPENDED;
@@ -117,7 +117,7 @@ static unsigned int hot_remove_sampling_periods_suspended = DEFAULT_NR_REMOVE_PE
  * Number of sampling periods to take average CPU load across
  * for CPU add.
  */
-#define DEFAULT_NR_ADD_PERIODS (30)
+#define DEFAULT_NR_ADD_PERIODS (40)
 #define DEFAULT_NR_ADD_PERIODS_SUSPENDED (100)
 static unsigned int curr_hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
 static unsigned int hot_add_sampling_periods = DEFAULT_NR_ADD_PERIODS;
@@ -133,10 +133,7 @@ static unsigned long min_sample_time = DEFAULT_MIN_SAMPLE_TIME;
  * The sample rate of the timer used to increase frequency
  */
 #define DEFAULT_TIMER_RATE (20 * USEC_PER_MSEC)
-#define DEFAULT_TIMER_RATE_SUSPENDED (30 * USEC_PER_MSEC)
-static unsigned long curr_timer_rate = DEFAULT_TIMER_RATE;
 static unsigned long timer_rate = DEFAULT_TIMER_RATE;
-static unsigned long timer_rate_suspended = DEFAULT_TIMER_RATE_SUSPENDED;
 
 /*
  * Wait this long before raising speed above hispeed, by default a single
@@ -175,7 +172,7 @@ struct cpufreq_governor cpufreq_gov_zenx = {
 static void cpufreq_zenx_timer_resched(
 	struct cpufreq_zenx_cpuinfo *pcpu)
 {
-	unsigned long expires = jiffies + usecs_to_jiffies(curr_timer_rate);
+	unsigned long expires = jiffies + usecs_to_jiffies(timer_rate);
 	unsigned long flags;
 
 	mod_timer_pinned(&pcpu->cpu_timer, expires);
@@ -1092,28 +1089,6 @@ static ssize_t store_timer_rate(struct kobject *kobj,
 static struct global_attr timer_rate_attr = __ATTR(timer_rate, 0644,
 		show_timer_rate, store_timer_rate);
 
-static ssize_t show_timer_rate_suspended(struct kobject *kobj,
-			struct attribute *attr, char *buf)
-{
-	return sprintf(buf, "%lu\n", timer_rate_suspended);
-}
-
-static ssize_t store_timer_rate_suspended(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t count)
-{
-	int ret;
-	unsigned long val;
-
-	ret = strict_strtoul(buf, 0, &val);
-	if (ret < 0)
-		return ret;
-	timer_rate_suspended = val;
-	return count;
-}
-
-static struct global_attr timer_rate_suspended_attr = __ATTR(timer_rate_suspended, 0644,
-		show_timer_rate_suspended, store_timer_rate_suspended);
-
 static ssize_t show_timer_slack(
 	struct kobject *kobj, struct attribute *attr, char *buf)
 {
@@ -1218,7 +1193,6 @@ static struct attribute *zenx_attributes[] = {
 	&hot_add_sampling_periods_suspended_attr.attr,
 	&min_sample_time_attr.attr,
 	&timer_rate_attr.attr,
-	&timer_rate_suspended_attr.attr,
 	&timer_slack.attr,
 	&boost.attr,
 	&boostpulse.attr,
@@ -1239,7 +1213,6 @@ static void zenx_early_suspend(struct early_suspend *handler) {
 	 */
 	curr_hot_remove_sampling_periods = hot_remove_sampling_periods_suspended;
 	curr_hot_add_sampling_periods = hot_add_sampling_periods_suspended;
-	curr_timer_rate = timer_rate_suspended;
 }
 
 static void zenx_late_resume(struct early_suspend *handler) {
@@ -1249,7 +1222,6 @@ static void zenx_late_resume(struct early_suspend *handler) {
 	 */
 	curr_hot_remove_sampling_periods = hot_remove_sampling_periods;
 	curr_hot_add_sampling_periods = hot_add_sampling_periods;
-	curr_timer_rate = timer_rate;
 	cpufreq_zenx_boost();
 }
 
@@ -1318,7 +1290,7 @@ static int cpufreq_governor_zenx(struct cpufreq_policy *policy,
 			pcpu->remove_avg_load =  0;
 			pcpu->last_cpu_load = 0;
 			down_write(&pcpu->enable_sem);
-			expires = jiffies + usecs_to_jiffies(curr_timer_rate);
+			expires = jiffies + usecs_to_jiffies(timer_rate);
 			pcpu->cpu_timer.expires = expires;
 			add_timer_on(&pcpu->cpu_timer, j);
 			if (timer_slack_val >= 0) {
